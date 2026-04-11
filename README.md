@@ -1,1 +1,1 @@
-# Transition-Aware-CPG-RBF-Locomotion-Control-with-DRL-Based-Continuous-Gait-Switching
+# Transition-Aware-CPG-RBF-Locomotion-Control-with-Continuous-Gait-Switching
