@@ -1,0 +1,23 @@
+
+logs/
+__pycache__/
+*.pyc
+*.pyo
+
+# Training artifacts (weights are large, keep only final ones via LFS or separate)
+weights/*_iter*.npy
+weights/*_init.npy
+IsaacLab-LocoNets/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
+CLAUDE.md
+
+*.egg-info/
+dist/
+build/
+*.so
+.ipynb_checkpoints/
+*.log
+*.tmp

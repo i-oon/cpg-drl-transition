@@ -1,0 +1,64 @@
+# Phase 1 – Task 3: Pacing
+# Train W_pace via PIBB. Target: 0.4 m/s lateral-pair gait.
+#
+# Pace gait: same-side legs in sync (FL+RL at 0°, FR+RR at 180°).
+# Visually: side-to-side swaying motion (like a camel).
+# Less stable than trot (lateral rocking) but clearly distinct gait.
+
+cpg:
+  alpha: 1.01
+  freq_train: 1.0      # Hz
+  dt: 0.02
+
+rbf:
+  num_neurons: 20
+  variance: 0.04
+
+gait:
+  name: pace
+  # Same-side pairs: FL+RL at 0°, FR+RR at 180°
+  phase_offsets: [0.0, 3.14159, 0.0, 3.14159]
+  # Lateral pairing: FL+RL share W[0], FR+RR share W[1]
+  leg_pair_map: [0, 1, 0, 1]
+
+pibb:
+  exploration_noise: 0.02
+  noise_decay_rate: 0.998
+  temperature: 10.0
+  init_var_boost: 2.0
+  max_iterations: 2000
+  convergence_threshold: 0.001
+
+reward:
+  # Same structure as walk — velocity tracking + stability
+  w1_distance: 3.0
+  w_gait: 1.0
+  w_air_time: 0.5
+
+  w2_instability: 3.0
+  w3_height_error: 10.0
+  w4_slippage: 0.3
+  w5_phase_error: 0.5        # Lateral pair sync penalty
+  w_lin_vel_z: 2.0
+  w_ang_vel_xy: 0.05
+  w_action_rate: 0.01
+  w_joint_pos: 0.1
+  w_energy: 0.005
+
+  height_nominal: 0.42
+  target_velocity: 0.4
+
+env:
+  num_envs: 256
+  episode_length: 200
+  robot: unitree_b1
+  terrain: flat
+
+logging:
+  log_dir: logs/phase1
+  run_name: pace
+  save_interval: 100
+  log_interval: 10
+
+output:
+  weights_path: weights/W_pace.npy

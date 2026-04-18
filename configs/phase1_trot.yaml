@@ -1,0 +1,51 @@
+# Phase 1 – Trot: Direct encoding (LocoNets-inspired)
+
+cpg:
+  alpha: 1.01
+  freq_train: 1.0
+  dt: 0.02
+
+rbf:
+  num_neurons: 20
+  variance: 0.04
+
+gait:
+  name: trot
+  phase_offsets: [0.0, 3.14159, 3.14159, 0.0]
+
+pibb:
+  exploration_noise: 0.045
+  noise_decay_rate: 0.995
+  temperature: 10.0
+  init_var_boost: 2.0
+  max_iterations: 1000
+  convergence_threshold: 0.001
+
+reward:
+  # Hybrid: LocoNets simplicity + B1 stability (7 terms)
+  w1_distance: 2.0              # raw vx (linear)
+  w2_instability: 2.0           # flat orientation (continuous, not threshold)
+  w3_height_error: 8.0          # |height - 0.42| (absolute)
+  w4_slippage: 2.0              # vertical bouncing (vz²)
+  w5_phase_error: 0.1           # yaw rate²
+  w_action_rate: 0.001          # action smoothness
+  w_gait: 1.0                    # phase-locked footfall pattern
+  w_energy: 1e-7                # torque (scaled for B1 mass)
+  height_nominal: 0.42
+  target_velocity: 0.4
+
+
+env:
+  num_envs: 512
+  episode_length: 500
+  robot: unitree_b1
+  terrain: flat
+
+logging:
+  log_dir: logs/phase1
+  run_name: trot_direct
+  save_interval: 100
+  log_interval: 10
+
+output:
+  weights_path: weights/W_trot.npy

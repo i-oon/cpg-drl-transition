@@ -1,0 +1,715 @@
+"""
+Unitree B1 environment for CPG-RBF Phase 1 (PIBB) training.
+
+Uses Isaac Lab DirectRLEnv (v0.36.3). The CPG generates joint position targets
+internally; PIBB perturbs W externally via set_weights() / set_weights_batch().
+
+Key design choices:
+  - Batched CPG: one oscillator state per env (num_envs, 2), one W per env
+    (num_envs, 20, 3), all ops vectorised with torch.
+  - PIBB API: set_weights(W) sets the same W for all envs;
+    set_weights_batch(W_batch) sets a different W per env.
+  - Gait dispatch: reward function is chosen by cfg.gait_name at runtime.
+
+Author: Disthorn Suttawet
+Course: FRA 503 Deep Reinforcement Learning
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import numpy as np
+import torch
+import yaml
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.utils import configclass
+
+from isaaclab_assets.robots.unitree import UNITREE_B1_CFG
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# CPG leg order throughout this project: FL, FR, RL, RR
+_CPG_LEG_ORDER = ["FL", "FR", "RL", "RR"]
+_CPG_JOINT_ORDER = ["hip_joint", "thigh_joint", "calf_joint"]
+
+# CPG joint names in flat order (12,): FL_hip, FL_thigh, FL_calf, FR_hip, ...
+CPG_JOINT_NAMES: list[str] = [
+    f"{leg}_{jt}" for leg in _CPG_LEG_ORDER for jt in _CPG_JOINT_ORDER
+]
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@configclass
+class UnitreeB1EnvCfg(DirectRLEnvCfg):
+    """Configuration for the Unitree B1 CPG-RBF environment."""
+
+    # --- Episode ---
+    episode_length_s: float = 10.0    # 500 steps at 50 Hz
+    decimation: int = 4               # Physics 200 Hz → control 50 Hz
+
+    # --- Spaces ---
+    # Obs: root_lin_vel_b(3) + root_ang_vel_b(3) + projected_gravity_b(3)
+    #      + joint_pos_rel(12) + joint_vel(12) = 33
+    observation_space: int = 33
+    action_space: int = 12            # Joint position targets (computed from CPG internally)
+    state_space: int = 0
+
+    # --- Simulation ---
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 200,
+        render_interval=decimation,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
+
+    # --- Terrain ---
+    terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
+
+    # --- Scene ---
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=64, env_spacing=2.5, replicate_physics=True
+    )
+
+    # --- Robot ---
+    robot: ArticulationCfg = UNITREE_B1_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot"
+    )
+
+    # --- Contact sensor ---
+    contact_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="/World/envs/env_.*/Robot/.*",
+        history_length=3,
+        update_period=0.005,
+        track_air_time=True,
+    )
+
+    # --- CPG parameters ---
+    cpg_alpha: float = 1.01    # SO(2) self-excitation
+    cpg_freq: float = 0.3      # Hz (fixed during Phase 1)
+    cpg_sigma2: float = 0.04   # RBF variance
+    cpg_num_rbf: int = 20
+
+    # --- Gait ---
+    # Set by make_env_from_config() — do not set manually.
+    gait_name: str = "walk"
+    phase_offsets: list = None  # [FL, FR, RL, RR] in radians
+
+    # Leg-to-W-pair mapping: which W slot (0 or 1) each leg uses.
+    # Walk/steer: front/rear split → [0,0,1,1] (FL+FR share, RL+RR share)
+    # Trot: diagonal split → [0,1,1,0] (FL+RR share, FR+RL share)
+    leg_pair_map: list = None  # [FL, FR, RL, RR] → W index (0 or 1)
+
+    # --- Reward weights (populated from YAML by make_env_from_config) ---
+    reward_w1: float = 1.0           # Forward velocity tracking
+    reward_w2: float = 0.5           # Orientation (tilt / flat body)
+    reward_w3: float = 0.2           # Height error
+    reward_w4: float = 0.3           # Slippage
+    reward_w5: float = 0.0           # Phase-error (trot) / heading-error (steer)
+    reward_w_gait: float = 2.0       # Phase-locked gait matching
+    reward_w_energy: float = 0.01    # Joint velocity penalty
+    reward_w_lin_vel_z: float = 2.0  # Vertical bouncing penalty
+    reward_w_ang_vel_xy: float = 0.05  # Roll/pitch rate penalty
+    reward_w_air_time: float = 0.5    # Feet air time (prevents shuffling)
+    reward_w_action_rate: float = 0.01  # Action smoothness penalty
+    reward_w_joint_pos: float = 0.1  # Default pose bias
+    reward_height_nominal: float = 0.42   # B1 standing height (m)
+    reward_target_velocity: float = 0.4   # m/s — walk speed target
+
+    # --- Action scaling ---
+    action_scale: float = 0.25           # CPG output × scale → joint offset (matches Isaac Lab convention)
+
+    # --- Termination ---
+    termination_height: float = 0.20     # Fall if body drops below this (m)
+
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+
+class UnitreeB1Env(DirectRLEnv):
+    """
+    Unitree B1 DirectRLEnv with CPG-RBF locomotion.
+
+    Designed for Phase 1 (PIBB): the environment steps its own CPG internally
+    and ignores the action tensor from the policy. PIBB sets W externally.
+
+    For Phase 2 (PPO), this env is subclassed/extended with α-blending logic.
+    """
+
+    cfg: UnitreeB1EnvCfg
+
+    def __init__(self, cfg: UnitreeB1EnvCfg, render_mode: str | None = None, **kwargs):
+        # Placeholders — populated after super().__init__() starts PhysX
+        self._foot_ids: torch.Tensor | None = None
+        self._undesired_body_ids: torch.Tensor | None = None
+        self._base_id: torch.Tensor | None = None
+
+        super().__init__(cfg, render_mode, **kwargs)
+        # PhysX is now running — safe to query joint names and body indices
+
+        # ---- Joint permutation (requires PhysX-initialized articulation) ----
+        self._build_joint_permutation()
+
+        # ---- Contact sensor body indices ----
+        if hasattr(self, "_contact_sensor") and self._contact_sensor is not None:
+            foot_ids, _ = self._contact_sensor.find_bodies(".*_foot$")
+            thigh_ids, _ = self._contact_sensor.find_bodies(".*_thigh$")
+            base_ids, _ = self._contact_sensor.find_bodies("trunk")
+            self._foot_ids = torch.tensor(foot_ids, dtype=torch.long, device=self.device)
+            self._undesired_body_ids = torch.tensor(thigh_ids, dtype=torch.long, device=self.device)
+            self._base_id = torch.tensor(base_ids, dtype=torch.long, device=self.device)
+
+        # ---- CPG state (batched across envs) ----
+        self._init_cpg()
+
+        # ---- Previous joint targets for action smoothness penalty ----
+        self._prev_joint_targets = torch.zeros(self.num_envs, 12, device=self.device)
+
+        # ---- Logged reward components ----
+        self._episode_sums = {
+            key: torch.zeros(self.num_envs, device=self.device)
+            for key in ["forward_vel", "orientation", "contact_penalty", "extra"]
+        }
+
+    # ------------------------------------------------------------------
+    # Scene setup
+    # ------------------------------------------------------------------
+
+    def _setup_scene(self):
+        self._robot = Articulation(self.cfg.robot)
+        self.scene.articulations["robot"] = self._robot
+
+        if self.cfg.contact_sensor is not None:
+            self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+            self.scene.sensors["contact_sensor"] = self._contact_sensor
+        else:
+            self._contact_sensor = None
+
+        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
+        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+
+        self.scene.clone_environments(copy_from_source=False)
+
+        light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        light_cfg.func("/World/Light", light_cfg)
+
+    def _build_joint_permutation(self):
+        """
+        Compute the index permutation from CPG joint order to Isaac Lab joint order.
+
+        CPG order: FL_hip, FL_thigh, FL_calf, FR_hip, ..., RR_calf
+        Isaac Lab order: whatever the USD articulation uses (typically alphabetical)
+
+        self._joint_perm[i] = index in CPG order for Isaac Lab joint i.
+        Usage: isaaclab_targets = cpg_targets[:, self._joint_perm]
+
+        Falls back to identity if _robot is not yet initialised (unit-test mocks).
+        """
+        if not hasattr(self, "_robot"):
+            self._joint_perm = torch.arange(12, dtype=torch.long, device=self.device)
+            return
+
+        isaaclab_names = list(self._robot.joint_names)
+        try:
+            perm = [CPG_JOINT_NAMES.index(name) for name in isaaclab_names]
+        except ValueError as e:
+            raise ValueError(
+                f"Joint name mismatch between CPG and Isaac Lab articulation.\n"
+                f"CPG names: {CPG_JOINT_NAMES}\n"
+                f"Isaac Lab names: {isaaclab_names}\n"
+                f"Error: {e}"
+            )
+        self._joint_perm = torch.tensor(perm, dtype=torch.long, device=self.device)
+
+    # ------------------------------------------------------------------
+    # CPG (batched)
+    # ------------------------------------------------------------------
+
+    def _init_cpg(self):
+        """Initialise batched CPG state for all envs."""
+        H = self.cfg.cpg_num_rbf
+
+        # Oscillator state (num_envs, 2) — starts at (1, 0)
+        self._osc_state = torch.zeros(self.num_envs, 2, device=self.device)
+        self._osc_state[:, 0] = 1.0
+
+        # Shared phase angle (scalar) — identical across all envs
+        self._phi: float = 0.0
+
+        # RBF centers on unit circle: (H, 2)
+        angles = 2.0 * math.pi * torch.arange(H, device=self.device) / H
+        self._rbf_centers = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1)
+
+        # Phase offsets per leg: (4,)
+        offsets = self.cfg.phase_offsets or [0.0, math.pi, math.pi / 2, 3 * math.pi / 2]
+        self._leg_offsets = torch.tensor(offsets, dtype=torch.float32, device=self.device)
+
+        # Direct encoding (LocoNets-inspired): W maps RBF to ALL 12 joints.
+        # Shape: (num_envs, 20, 12) — 20 RBF neurons × 12 joints
+        # All legs see the SAME RBF activations; W columns differentiate legs.
+        # Columns: [FL_hip, FL_thigh, FL_calf, FR_hip, ..., RR_calf] (CPG order)
+        self._W = torch.zeros(self.num_envs, H, 12, device=self.device)
+
+    def _reset_cpg(self, env_ids: torch.Tensor):
+        """Reset CPG oscillator state for selected envs."""
+        self._osc_state[env_ids, 0] = 1.0
+        self._osc_state[env_ids, 1] = 0.0
+
+    def _step_cpg_batch(self) -> torch.Tensor:
+        """
+        Direct encoding (LocoNets-inspired): all legs see same RBF, W differentiates.
+
+        Steps:
+          1. Step SO(2) oscillator.
+          2. Normalise to unit circle.
+          3. Compute RBF activations (same for all legs — no phase rotation).
+          4. Multiply by W: (num_envs, 20) × (num_envs, 20, 12) → (num_envs, 12).
+          5. Apply tanh → bounded [-1, 1] rad.
+          6. Reorder from CPG joint order to Isaac Lab joint order.
+
+        Returns:
+            joint_targets: (num_envs, 12) in Isaac Lab order, bounded by tanh.
+        """
+        alpha = self.cfg.cpg_alpha
+        freq = self.cfg.cpg_freq
+        control_dt = self.cfg.sim.dt * self.cfg.decimation
+
+        # 1. Step oscillator
+        cos_phi = math.cos(self._phi)
+        sin_phi = math.sin(self._phi)
+        R = alpha * torch.tensor(
+            [[cos_phi, sin_phi], [-sin_phi, cos_phi]],
+            dtype=torch.float32, device=self.device,
+        )
+        self._osc_state = torch.tanh(self._osc_state @ R.T)
+        self._phi += 2.0 * math.pi * freq * control_dt
+
+        # 2. Normalise to unit circle
+        norm = self._osc_state.norm(dim=1, keepdim=True).clamp(min=1e-6)
+        osc_n = self._osc_state / norm   # (num_envs, 2)
+
+        # 3. RBF activations — SAME for all legs (no phase rotation)
+        # osc_n: (num_envs, 2), centers: (H, 2) → diff: (num_envs, H, 2)
+        diff = osc_n.unsqueeze(1) - self._rbf_centers.unsqueeze(0)
+        dist2 = (diff ** 2).sum(dim=2)                # (num_envs, H)
+        rbf = torch.exp(-dist2 / self.cfg.cpg_sigma2) # (num_envs, H)
+
+        # 4. Direct W mapping: rbf @ W → 12 joint outputs
+        # rbf: (num_envs, H), W: (num_envs, H, 12) → (num_envs, 12)
+        raw = torch.einsum("en,enj->ej", rbf, self._W)
+
+        # 5. tanh clamps output to [-1, 1] rad — prevents W explosion
+        cpg_flat = torch.tanh(raw)
+
+        # 6. Reorder CPG order → Isaac Lab order
+        return cpg_flat[:, self._joint_perm]
+
+    # ------------------------------------------------------------------
+    # Public PIBB API
+    # ------------------------------------------------------------------
+
+    def set_weights(self, W: np.ndarray):
+        """
+        Set the same W matrix for all parallel environments.
+
+        Args:
+            W: (20, 12) direct encoding weight matrix.
+        """
+        H = self.cfg.cpg_num_rbf
+        assert W.shape == (H, 12), f"Expected W shape ({H}, 12), got {W.shape}"
+        W_t = torch.tensor(W, dtype=torch.float32, device=self.device)
+        self._W[:] = W_t.unsqueeze(0)   # broadcast to all envs
+
+    def set_weights_batch(self, W_batch: np.ndarray):
+        """
+        Set a different W matrix for each environment.
+
+        Args:
+            W_batch: (num_envs, 20, 12) numpy array.
+        """
+        H = self.cfg.cpg_num_rbf
+        N = self.num_envs
+        assert W_batch.shape == (N, H, 12), (
+            f"Expected W_batch shape ({N}, {H}, 12), got {W_batch.shape}"
+        )
+        self._W = torch.tensor(W_batch, dtype=torch.float32, device=self.device)
+
+    def get_weights(self) -> np.ndarray:
+        """Return W from env 0 as (20, 12) numpy array."""
+        return self._W[0].cpu().numpy()
+
+    # ------------------------------------------------------------------
+    # DirectRLEnv interface
+    # ------------------------------------------------------------------
+
+    def _pre_physics_step(self, actions: torch.Tensor):
+        """Compute CPG joint targets. External actions are ignored for Phase 1."""
+        self._prev_joint_targets = self._joint_targets.clone() if hasattr(self, '_joint_targets') else torch.zeros(self.num_envs, 12, device=self.device)
+        self._joint_targets = self._step_cpg_batch()  # (num_envs, 12)
+
+    def _apply_action(self):
+        """Apply tanh-bounded CPG offsets on top of the default standing pose."""
+        self._robot.set_joint_position_target(
+            self._robot.data.default_joint_pos + self._joint_targets
+        )
+
+    def _get_observations(self) -> dict:
+        obs = torch.cat(
+            [
+                self._robot.data.root_lin_vel_b,           # (N, 3) forward/lateral/up in body frame
+                self._robot.data.root_ang_vel_b,           # (N, 3) roll/pitch/yaw rates
+                self._robot.data.projected_gravity_b,      # (N, 3) tilt signal: [0,0,-1] when upright
+                self._robot.data.joint_pos                  # (N, 12) joint positions
+                - self._robot.data.default_joint_pos,       #         relative to default
+                self._robot.data.joint_vel,                # (N, 12) joint velocities
+            ],
+            dim=-1,
+        )
+        return {"policy": obs}
+
+    def _get_rewards(self) -> torch.Tensor:
+        gait = self.cfg.gait_name
+        if gait == "walk":
+            reward = self._reward_walk()
+        elif gait == "trot":
+            reward = self._reward_trot()
+        elif gait == "pace":
+            reward = self._reward_pace()
+        elif gait == "bound":
+            reward = self._reward_bound()
+        elif gait == "steer":
+            reward = self._reward_steer()
+        else:
+            raise ValueError(f"Unknown gait_name: {gait!r}")
+
+        # Accumulate for logging
+        self._episode_sums["forward_vel"] += reward
+        return reward
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+        # Fall: body too low
+        body_height = self._robot.data.root_pos_w[:, 2]
+        fallen = body_height < self.cfg.termination_height
+
+        # Fall: base link makes contact (body slam) — only when sensor is active
+        if self._contact_sensor is not None and self._base_id is not None:
+            net_forces = self._contact_sensor.data.net_forces_w_history
+            base_contact = (
+                torch.max(
+                    torch.norm(net_forces[:, :, self._base_id], dim=-1), dim=1
+                )[0] > 1.0
+            ).any(dim=1)
+            fallen = fallen | base_contact
+
+        return fallen, time_out
+
+    def _reset_idx(self, env_ids: torch.Tensor | None):
+        if env_ids is None or len(env_ids) == self.num_envs:
+            env_ids = self._robot._ALL_INDICES
+
+        self._robot.reset(env_ids)
+        super()._reset_idx(env_ids)
+
+        # Reset robot to default pose + env origin offset
+        joint_pos = self._robot.data.default_joint_pos[env_ids]
+        joint_vel = self._robot.data.default_joint_vel[env_ids]
+        default_root_state = self._robot.data.default_root_state[env_ids]
+        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+
+        self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # Reset CPG oscillator state
+        self._reset_cpg(env_ids)
+
+        # Reset episode sums for logging
+        for key in self._episode_sums:
+            self._episode_sums[key][env_ids] = 0.0
+
+    # ------------------------------------------------------------------
+    # Reward functions (one per gait)
+    # ------------------------------------------------------------------
+
+    def _reward_simple(self) -> torch.Tensor:
+        """
+        Hybrid reward: LocoNets simplicity + B1 stability.
+
+        LocoNets' 6-term reward works for tiny robots that can't fall.
+        B1 (50 kg) needs continuous stability penalties, not just thresholds.
+
+        7 terms: raw vx + 6 penalties (orient, height, bounce, heading, action, torque)
+        """
+        # Forward velocity — V-shaped: increases up to target, DECREASES above
+        # At 0.4 m/s: reward = 0.4 (peak). At 0.8 m/s: reward = 0.0 (penalized!)
+        vx = self._robot.data.root_lin_vel_b[:, 0]
+        target = self.cfg.reward_target_velocity
+        overshoot = torch.clamp(vx - target, min=0.0)
+        vel_reward = vx - 2.0 * overshoot   # linear up to target, then -1 slope
+
+        # Orientation: continuous penalty (not threshold) — essential for B1
+        flat_orient = torch.sum(torch.square(
+            self._robot.data.projected_gravity_b[:, :2]
+        ), dim=1)
+
+        # Height: keep at 0.42m — prevents lunging/bouncing exploit
+        height = self._robot.data.root_pos_w[:, 2]
+        height_error = torch.abs(height - self.cfg.reward_height_nominal)
+
+        # Vertical bouncing: critical for B1 (LocoNets robot can't bounce)
+        lin_vel_z = torch.square(self._robot.data.root_lin_vel_b[:, 2])
+
+        # Heading: penalise yaw drift
+        yaw_rate = torch.square(self._robot.data.root_ang_vel_b[:, 2])
+
+        # Action rate — smoothness
+        action_rate = torch.sum(torch.square(
+            self._joint_targets - self._prev_joint_targets
+        ), dim=1)
+
+        # Energy proxy: joint velocity squared (torque not reliably available)
+        energy = torch.sum(torch.square(self._robot.data.joint_vel), dim=1)
+
+        w1 = float(self.cfg.reward_w1)
+        w2 = float(self.cfg.reward_w2)
+        w3 = float(self.cfg.reward_w3)
+        w4 = float(self.cfg.reward_w4)
+        w5 = float(self.cfg.reward_w5)
+        w_ar = float(self.cfg.reward_w_action_rate)
+        w_e = float(self.cfg.reward_w_energy)
+
+        return (w1 * vel_reward
+                - w2 * flat_orient
+                - w3 * height_error
+                - w4 * lin_vel_z
+                - w5 * yaw_rate
+                - w_ar * action_rate
+                - w_e * energy)
+
+    def _reward_walk(self) -> torch.Tensor:
+        return self._reward_simple()
+
+
+    def _reward_trot(self) -> torch.Tensor:
+        return self._reward_simple()
+
+    def _reward_pace(self) -> torch.Tensor:
+        return self._reward_simple()
+
+    def _reward_bound(self) -> torch.Tensor:
+        return self._reward_simple()
+
+    def _reward_steer(self) -> torch.Tensor:
+        return self._reward_simple()
+
+    # ------------------------------------------------------------------
+    # Reward helpers
+    # ------------------------------------------------------------------
+
+    def _compute_gait_reward(self) -> torch.Tensor:
+        """
+        Phase-locked gait reward: feet should match expected stance/swing
+        based on the CPG oscillator phase.
+
+        Uses cos(φ + θ_k) to determine expected contact:
+          cos > 0 → stance (foot on ground)
+          cos < 0 → swing  (foot in air)
+
+        Returns (num_envs,) reward in [0, 1]: fraction of legs matching.
+        """
+        if self._foot_ids is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        # Expected contact state from CPG phase: (4,) bool
+        leg_phases = self._phi + self._leg_offsets   # (4,)
+        expected_contact = torch.cos(leg_phases) > 0  # (4,) stance=True
+
+        # Actual contact from sensor: (num_envs, 4)
+        net_forces = self._contact_sensor.data.net_forces_w_history
+        foot_forces = torch.norm(net_forces[:, 0, :, :], dim=-1)  # (N, B)
+        actual_contact = foot_forces[:, self._foot_ids] > 1.0     # (N, 4)
+
+        # Reward: fraction of legs matching expected phase
+        match = (actual_contact == expected_contact.unsqueeze(0)).float()  # (N, 4)
+        return match.mean(dim=1)   # (N,)
+
+    def _compute_slippage(self) -> torch.Tensor:
+        """
+        Foot slippage: norm of foot contact force × foot speed proxy.
+
+        Uses lateral + vertical root velocity as a rough foot-speed proxy
+        (exact foot velocity requires forward kinematics — avoid for now).
+
+        Returns (num_envs,) slippage penalty.
+        """
+        if self._foot_ids is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        net_forces = self._contact_sensor.data.net_forces_w_history   # (N, H, B, 3)
+        foot_forces = torch.norm(net_forces[:, 0, :, :], dim=-1)      # (N, B)
+        in_contact = foot_forces[:, self._foot_ids] > 1.0              # (N, 4)
+
+        # Proxy: lateral (y) velocity when in contact indicates slipping
+        # Use only vy (index 1), NOT vz which includes physics settling noise
+        lat_vel = torch.abs(self._robot.data.root_lin_vel_b[:, 1])    # (N,)
+        slippage = in_contact.float().sum(dim=1) * lat_vel             # (N,)
+        return slippage
+
+    def _compute_trot_phase_error(self) -> torch.Tensor:
+        """
+        Phase error for trot: penalise asymmetry between diagonal pairs.
+
+        Measures difference in last air time between FL-RR (pair A)
+        and FR-RL (pair B). Perfect trot has pairs alternating equally.
+        """
+        if self._foot_ids is None or len(self._foot_ids) < 4:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        air_times = self._contact_sensor.data.last_air_time[:, self._foot_ids]  # (N, 4)
+        # foot order matches B1 calf order: FL, FR, RL, RR (verify with find_bodies)
+        # Pair A: FL(0), RR(3); Pair B: FR(1), RL(2)
+        pair_a_diff = torch.abs(air_times[:, 0] - air_times[:, 3])
+        pair_b_diff = torch.abs(air_times[:, 1] - air_times[:, 2])
+        return pair_a_diff + pair_b_diff
+
+    def _compute_bound_phase_error(self) -> torch.Tensor:
+        """
+        Phase error for bound: penalise asymmetry within front pair and rear pair.
+
+        Front pair: FL(0) and FR(1) should have matching air times.
+        Rear pair: RL(2) and RR(3) should have matching air times.
+        """
+        if self._foot_ids is None or len(self._foot_ids) < 4:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        air_times = self._contact_sensor.data.last_air_time[:, self._foot_ids]
+        front_diff = torch.abs(air_times[:, 0] - air_times[:, 1])  # FL vs FR
+        rear_diff  = torch.abs(air_times[:, 2] - air_times[:, 3])  # RL vs RR
+        return front_diff + rear_diff
+
+    def _compute_pace_phase_error(self) -> torch.Tensor:
+        """
+        Phase error for pace: penalise asymmetry between lateral pairs.
+
+        Measures difference in last air time between FL-RL (left pair)
+        and FR-RR (right pair). Perfect pace has same-side pairs in sync.
+        """
+        if self._foot_ids is None or len(self._foot_ids) < 4:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        air_times = self._contact_sensor.data.last_air_time[:, self._foot_ids]  # (N, 4)
+        # Left pair: FL(0), RL(2); Right pair: FR(1), RR(3)
+        left_diff  = torch.abs(air_times[:, 0] - air_times[:, 2])
+        right_diff = torch.abs(air_times[:, 1] - air_times[:, 3])
+        return left_diff + right_diff
+
+    def _compute_air_time_bonus(self) -> torch.Tensor:
+        """
+        Reward feet for spending appropriate time in the air.
+
+        Target air time = 0.35 × cycle_period (roughly 35% swing duty factor).
+        At 1.0 Hz: target = 0.35s.  At 0.3 Hz: target = 1.17s.
+        """
+        if self._foot_ids is None:
+            return torch.zeros(self.num_envs, device=self.device)
+
+        target_air = 0.35 / self.cfg.cpg_freq   # swing fraction × cycle time
+
+        first_contact = self._contact_sensor.compute_first_contact(self.step_dt)
+        foot_first_contact = first_contact[:, self._foot_ids]               # (N, 4)
+        last_air = self._contact_sensor.data.last_air_time[:, self._foot_ids]  # (N, 4)
+        bonus = torch.sum((last_air - target_air) * foot_first_contact, dim=1)  # (N,)
+        return bonus.clamp(min=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def make_env_from_config(config_path: str, num_envs: int | None = None) -> UnitreeB1Env:
+    """
+    Create a UnitreeB1Env from a Phase 1 YAML config file.
+
+    Args:
+        config_path: Path to a phase1_*.yaml config (relative to project root).
+        num_envs:    Override num_envs from the YAML (optional).
+
+    Returns:
+        Configured UnitreeB1Env instance.
+    """
+    with open(config_path, "r") as f:
+        cfg_dict = yaml.safe_load(f)
+
+    env_cfg = UnitreeB1EnvCfg()
+
+    # Gait
+    env_cfg.gait_name = cfg_dict["gait"]["name"]
+    env_cfg.phase_offsets = cfg_dict["gait"]["phase_offsets"]
+    env_cfg.leg_pair_map = cfg_dict["gait"].get("leg_pair_map", [0, 0, 1, 1])
+
+    # CPG
+    cpg = cfg_dict.get("cpg", {})
+    env_cfg.cpg_alpha = cpg.get("alpha", 1.01)
+    env_cfg.cpg_freq = cpg.get("freq_train", 0.3)
+    env_cfg.cpg_sigma2 = cfg_dict.get("rbf", {}).get("variance", 0.04)
+
+    # Reward
+    rwd = cfg_dict.get("reward", {})
+    env_cfg.reward_w1 = rwd.get("w1_distance", rwd.get("w1_velocity", 1.0))
+    env_cfg.reward_w2 = rwd.get("w2_instability", 0.5)
+    env_cfg.reward_w3 = rwd.get("w3_height_error", rwd.get("w3_collision", 0.2))
+    env_cfg.reward_w4 = rwd.get("w4_slippage", 0.3)
+    env_cfg.reward_w5 = rwd.get("w5_phase_error", rwd.get("w5_heading_error", 0.0))
+    env_cfg.reward_w_gait = rwd.get("w_gait", 2.0)
+    env_cfg.reward_w_energy = rwd.get("w_energy", 0.01)
+    env_cfg.reward_w_air_time = rwd.get("w_air_time", 0.5)
+    env_cfg.reward_w_lin_vel_z = rwd.get("w_lin_vel_z", 2.0)
+    env_cfg.reward_w_ang_vel_xy = rwd.get("w_ang_vel_xy", 0.05)
+    env_cfg.reward_w_action_rate = rwd.get("w_action_rate", 0.01)
+    env_cfg.reward_w_joint_pos = rwd.get("w_joint_pos", 0.1)
+    env_cfg.reward_height_nominal = rwd.get("height_nominal", 0.42)
+    env_cfg.reward_target_velocity = rwd.get("target_velocity", 0.4)
+
+    # Episode
+    env_cfg.episode_length_s = cfg_dict.get("env", {}).get("episode_length", 500) * env_cfg.sim.dt * env_cfg.decimation
+
+    # Num envs
+    n = num_envs or cfg_dict.get("env", {}).get("num_envs", 64)
+    env_cfg.scene = InteractiveSceneCfg(num_envs=n, env_spacing=2.5, replicate_physics=True)
+
+    return UnitreeB1Env(env_cfg)

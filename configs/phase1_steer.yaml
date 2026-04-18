@@ -1,0 +1,67 @@
+# Phase 1 – Task 3: Steering
+# Train W_steer via PIBB. Target: forward motion with yaw control.
+#
+# Same phase offsets as walk — steering modifies amplitude, not timing.
+# Warm-starts from W_walk.
+
+cpg:
+  alpha: 1.01
+  freq_train: 1.0      # Hz — same as walk
+  dt: 0.02
+
+rbf:
+  num_neurons: 20
+  variance: 0.04
+
+gait:
+  name: steer
+  # Same phase offsets as walk
+  phase_offsets: [0.0, 3.14159, 1.5708, 4.7124]
+  # Front/rear pairing (same as walk)
+  leg_pair_map: [0, 0, 1, 1]
+
+pibb:
+  exploration_noise: 0.02
+  noise_decay_rate: 0.998
+  temperature: 10.0
+  init_var_boost: 2.0
+  max_iterations: 2000
+  convergence_threshold: 0.001
+
+reward:
+  # Positive rewards
+  w1_distance: 3.0               # Velocity tracking
+  w_gait: 1.0                    # Phase-locked gait matching
+  w_air_time: 0.5                # Feet air time
+
+  # Penalties
+  w2_instability: 3.0            # Flat orientation
+  w3_height_error: 10.0          # Height deviation (absolute)
+  w4_slippage: 0.3               # Foot slip
+  w5_heading_error: 1.0          # Heading error (yaw rate)
+  w_lin_vel_z: 2.0               # Vertical bouncing
+  w_ang_vel_xy: 0.05             # Roll/pitch rate
+  w_action_rate: 0.01            # CPG smoothness
+  w_joint_pos: 0.1               # Default pose bias
+  w_energy: 0.005                # Joint velocity
+
+  height_nominal: 0.42
+  target_velocity: 0.4           # m/s — same as walk
+
+env:
+  num_envs: 256
+  episode_length: 200
+  robot: unitree_b1
+  terrain: flat
+
+logging:
+  log_dir: logs/phase1
+  run_name: steer
+  save_interval: 100
+  log_interval: 10
+
+init:
+  pretrained_weights: weights/W_walk.npy
+
+output:
+  weights_path: weights/W_steer.npy
