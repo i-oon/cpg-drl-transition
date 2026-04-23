@@ -202,14 +202,19 @@ class TestConfig:
 
 class TestCPGBatch:
 
-    def test_oscillator_state_shape(self):
+    def test_phase_idx_is_scalar_int(self):
         env = make_env(num_envs=8)
-        assert env._osc_state.shape == (8, 2)
+        # Pre-computed CPG uses a single integer phase shared across envs
+        assert isinstance(env._phase_idx, int)
+        assert env._phase_idx == 0
 
-    def test_rbf_centers_on_unit_circle(self):
+    def test_kenne_table_shape(self):
         env = make_env()
-        norms = env._rbf_centers.norm(dim=1)
-        assert torch.allclose(norms, torch.ones(20), atol=1e-6)
+        # KENNE is a pre-computed (period+1, H) lookup of RBF activations
+        assert env._KENNE.shape[1] == 20
+        assert env._KENNE.shape[0] == env._period + 1
+        # RBF activations are exp(...) ∈ (0, 1]
+        assert (env._KENNE >= 0.0).all() and (env._KENNE <= 1.0).all()
 
     def test_step_returns_correct_shape(self):
         env = make_env(num_envs=6)
@@ -218,7 +223,7 @@ class TestCPGBatch:
 
     def test_step_is_finite(self):
         env = make_env(num_envs=4)
-        env._W = torch.randn(4, 20, 12) * 0.1
+        env._W = torch.randn(4, 20, 3) * 0.1
         for _ in range(200):
             targets = env._step_cpg_batch()
         assert torch.isfinite(targets).all(), "CPG targets contain NaN/Inf"
@@ -232,8 +237,8 @@ class TestCPGBatch:
     def test_different_W_produce_different_targets(self):
         """Different W matrices should produce different joint targets."""
         env = make_env(num_envs=2)
-        W1 = np.random.randn(20, 12).astype(np.float32) * 0.1
-        W2 = np.random.randn(20, 12).astype(np.float32) * 0.1
+        W1 = np.random.randn(20, 3).astype(np.float32) * 0.1
+        W2 = np.random.randn(20, 3).astype(np.float32) * 0.1
         env._W[0] = torch.tensor(W1)
         env._W[1] = torch.tensor(W2)
         targets = env._step_cpg_batch()
@@ -248,9 +253,9 @@ class TestCPGBatch:
         assert abs(phi_after - phi_before - expected) < 1e-9
 
     def test_tanh_bounds_output(self):
-        """Direct encoding output should be bounded by tanh to [-1, 1]."""
+        """Output should be bounded by tanh to [-1, 1]."""
         env = make_env(num_envs=4)
-        env._W = torch.randn(4, 20, 12) * 10.0   # large W
+        env._W = torch.randn(4, 20, 3) * 10.0   # large W
         targets = env._step_cpg_batch()
         assert (targets >= -1.0).all() and (targets <= 1.0).all(), "tanh should bound output"
 
@@ -262,18 +267,16 @@ class TestCPGBatch:
 class TestWeightAPI:
 
     def test_set_weights_broadcasts_to_all_envs(self):
-        """(20,12) input is broadcast to all envs."""
         env = make_env(num_envs=8)
-        W = np.ones((20, 12), dtype=np.float32) * 0.5
+        W = np.ones((20, 3), dtype=np.float32) * 0.5
         env.set_weights(W)
-        expected = torch.full((20, 12), 0.5)
+        expected = torch.full((20, 3), 0.5)
         for i in range(8):
             assert torch.allclose(env._W[i], expected)
 
     def test_set_weights_batch_assigns_per_env(self):
-        """(num_envs, 20, 12) assigns per env."""
         env = make_env(num_envs=4)
-        W_batch = np.arange(4 * 20 * 12, dtype=np.float32).reshape(4, 20, 12)
+        W_batch = np.arange(4 * 20 * 3, dtype=np.float32).reshape(4, 20, 3)
         env.set_weights_batch(W_batch)
         for i in range(4):
             assert torch.allclose(env._W[i], torch.tensor(W_batch[i]))
@@ -281,26 +284,26 @@ class TestWeightAPI:
     def test_set_weights_wrong_shape_raises(self):
         env = make_env()
         with pytest.raises(AssertionError):
-            env.set_weights(np.zeros((20, 4)))   # wrong: should be (20, 12)
+            env.set_weights(np.zeros((20, 12)))   # wrong: should be (20, 3)
 
     def test_set_weights_batch_wrong_shape_raises(self):
         env = make_env(num_envs=4)
         with pytest.raises(AssertionError):
-            env.set_weights_batch(np.zeros((3, 20, 12)))   # wrong num_envs
+            env.set_weights_batch(np.zeros((3, 20, 3)))   # wrong num_envs
 
     def test_get_weights_returns_env0(self):
         env = make_env(num_envs=4)
-        W = np.random.randn(20, 12).astype(np.float32)
+        W = np.random.randn(20, 3).astype(np.float32)
         env.set_weights(W)
         W_back = env.get_weights()
-        assert W_back.shape == (20, 12)
+        assert W_back.shape == (20, 3)
         assert np.allclose(W, W_back)
 
     def test_weights_affect_cpg_output(self):
         """Different W → different joint targets."""
         env = make_env(num_envs=2)
-        W1 = np.ones((20, 12), dtype=np.float32)
-        W2 = np.ones((20, 12), dtype=np.float32) * (-1.0)
+        W1 = np.ones((20, 3), dtype=np.float32)
+        W2 = np.ones((20, 3), dtype=np.float32) * (-1.0)
         env._W[0] = torch.tensor(W1)
         env._W[1] = torch.tensor(W2)
         targets = env._step_cpg_batch()
@@ -313,26 +316,23 @@ class TestWeightAPI:
 
 class TestCPGReset:
 
-    def test_reset_restores_osc_state(self):
+    def test_partial_reset_does_not_reset_phase(self):
+        """Phase is shared across envs; partial reset must not rewind it."""
         env = make_env(num_envs=4)
-        # Run for a while to move away from initial state
-        for _ in range(200):
+        for _ in range(5):
             env._step_cpg_batch()
-        # Reset env 0 and 2
+        phase_before = env._phase_idx
         env._reset_cpg(torch.tensor([0, 2]))
-        assert torch.allclose(env._osc_state[0], torch.tensor([1.0, 0.0]))
-        assert torch.allclose(env._osc_state[2], torch.tensor([1.0, 0.0]))
-        # Env 1 and 3 should still be in evolved state
-        assert not torch.allclose(env._osc_state[1], torch.tensor([1.0, 0.0]))
+        assert env._phase_idx == phase_before
 
     def test_full_reset_all_envs(self):
         env = make_env(num_envs=4)
-        for _ in range(200):
+        for _ in range(5):
             env._step_cpg_batch()
+        assert env._phase_idx != 0
         env._reset_cpg(torch.arange(4))
-        expected = torch.zeros(4, 2)
-        expected[:, 0] = 1.0
-        assert torch.allclose(env._osc_state, expected)
+        assert env._phase_idx == 0
+        assert env._phi == 0.0
 
 
 # ---------------------------------------------------------------------------

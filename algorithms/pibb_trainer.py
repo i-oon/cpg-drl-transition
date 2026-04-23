@@ -71,11 +71,11 @@ class PIBBTrainer:
         self.num_rbf: int      = config.get("rbf", {}).get("num_neurons", 20)
         self.episode_steps: int = config["env"]["episode_length"]
 
-        # Direct encoding: W shape (20, 12) — 20 RBF neurons × 12 joints
-        self.num_joints: int = 12
+        # Indirect encoding: shared W shape (20, 3) — 20 RBF neurons × (hip, thigh, calf).
+        # Same W drives all 4 legs; per-leg timing comes from CPG phase offsets.
+        self.num_joints: int = 3
 
-        # Current best W — random init (LocoNets uses uniform(-0.1, 0.1))
-        # Small random values give PIBB initial leg movements to explore from
+        # Current best W — random init (LocoNets-style, small uniform values)
         self.W = np.random.uniform(-0.1, 0.1,
             (self.num_rbf, self.num_joints)).astype(np.float32)
 
@@ -145,8 +145,8 @@ class PIBBTrainer:
             t0 = time.time()
 
             # 1. Sample perturbations and set per-env weights
-            perturbations = self._sample_perturbations(iteration)  # (num_envs, 20, 12)
-            W_batch = self.W[None] + perturbations           # (num_envs, 20, 12)
+            perturbations = self._sample_perturbations(iteration)  # (num_envs, 20, 3)
+            W_batch = self.W[None] + perturbations           # (num_envs, 20, 3)
             self.env.set_weights_batch(W_batch)
 
             # 2. Run one episode, collect cumulative rewards
@@ -207,24 +207,18 @@ class PIBBTrainer:
     # Private helpers
     # ------------------------------------------------------------------
 
-    # Per-joint noise scaling for direct encoding (20×12).
-    # 12 columns = [FL_hip, FL_thigh, FL_calf, FR_hip, FR_thigh, FR_calf,
-    #               RL_hip, RL_thigh, RL_calf, RR_hip, RR_thigh, RR_calf]
-    # Hip columns (0,3,6,9) get 10× less noise.
-    _JOINT_NOISE_SCALE = np.array(
-        [0.1, 1.0, 0.8] * 4, dtype=np.float32   # repeated for 4 legs
-    )  # shape (12,)
+    # Per-joint noise scaling for indirect encoding (20×3).
+    # Column layout: [hip, thigh, calf] — shared across all 4 legs.
+    # Hip gets 10× less noise to prevent lateral explosion.
+    _JOINT_NOISE_SCALE = np.array([0.1, 1.0, 0.8], dtype=np.float32)  # (3,)
 
     def _sample_perturbations(self, iteration: int) -> np.ndarray:
-        """Sample (num_envs, 20, 12) Gaussian noise with per-joint scaling.
-
-        Hip columns get 10× less noise. First iteration uses init_var_boost.
-        """
+        """Sample (num_envs, 20, 3) Gaussian noise with per-joint scaling."""
         scale = self.sigma * (self.init_var_boost if iteration == 1 else 1.0)
         noise = np.random.randn(
             self.env.num_envs, self.num_rbf, self.num_joints
         ).astype(np.float32)
-        noise *= scale * self._JOINT_NOISE_SCALE[None, None, :]  # (1, 1, 12) broadcast
+        noise *= scale * self._JOINT_NOISE_SCALE[None, None, :]
         return noise
 
     def _run_episode(self) -> np.ndarray:
@@ -264,8 +258,8 @@ class PIBBTrainer:
         p = s / s.sum()                                            # (num_envs,)
 
         # Weighted sum of perturbations
-        # perturbations: (num_envs, 20, 12), p: (num_envs,)
-        delta_W = (p[:, None, None] * perturbations).sum(axis=0)   # (20, 12)
+        # perturbations: (num_envs, 20, 3), p: (num_envs,)
+        delta_W = (p[:, None, None] * perturbations).sum(axis=0)   # (20, 3)
         self.W += delta_W
 
     def _has_converged(self, reward_history: list[float], window: int = 50) -> bool:
@@ -349,16 +343,12 @@ class PIBBTrainer:
         # --- Exploration noise ---
         self.writer.add_scalar("noise/sigma", self.sigma, iteration)
 
-        # --- Weight matrix (direct: 20×12) ---
+        # --- Weight matrix (indirect: 20×3) ---
         self.writer.add_scalar("weights/total_norm", float(np.linalg.norm(self.W)), iteration)
-        leg_names = ["FL", "FR", "RL", "RR"]
-        joint_names = ["hip", "thigh", "calf"]
-        for k, leg in enumerate(leg_names):
-            for j, jn in enumerate(joint_names):
-                col = k * 3 + j
-                self.writer.add_scalar(
-                    f"weights/{leg}_{jn}", float(np.linalg.norm(self.W[:, col])), iteration
-                )
+        for j, joint in enumerate(["hip", "thigh", "calf"]):
+            self.writer.add_scalar(
+                f"weights/{joint}", float(np.linalg.norm(self.W[:, j])), iteration
+            )
         self.writer.add_histogram("weights/W_flat", self.W.flatten(), iteration)
 
         # --- Reward distribution across envs ---

@@ -66,7 +66,7 @@ class UnitreeB1EnvCfg(DirectRLEnvCfg):
     # Obs: root_lin_vel_b(3) + root_ang_vel_b(3) + projected_gravity_b(3)
     #      + joint_pos_rel(12) + joint_vel(12) = 33
     observation_space: int = 33
-    action_space: int = 12            # Joint position targets (computed from CPG internally)
+    action_space: int = 12            # Unused by PIBB (CPG generates targets internally)
     state_space: int = 0
 
     # --- Simulation ---
@@ -259,82 +259,98 @@ class UnitreeB1Env(DirectRLEnv):
     # ------------------------------------------------------------------
 
     def _init_cpg(self):
-        """Initialise batched CPG state for all envs."""
+        """Initialise batched CPG state for all envs (LocoNets pre-compute approach).
+
+        Pre-computes one full period of the SO(2) oscillator trajectory ONCE,
+        samples RBF centers from the actual trajectory, and pre-computes the
+        full RBF activation lookup table (KENNE).
+        At runtime: KENNE[phase_index] gives RBF activations directly.
+        """
         H = self.cfg.cpg_num_rbf
+        alpha = self.cfg.cpg_alpha
+        # LocoNets uses phi=0.06π (0.1885 rad/step) — controls period length
+        phi = 2.0 * math.pi * self.cfg.cpg_freq * self.cfg.sim.dt * self.cfg.decimation
 
-        # Oscillator state (num_envs, 2) — starts at (1, 0)
-        self._osc_state = torch.zeros(self.num_envs, 2, device=self.device)
-        self._osc_state[:, 0] = 1.0
+        # 1. Pre-compute one full period of the oscillator trajectory
+        w11 = alpha * math.cos(phi)
+        w12 = alpha * math.sin(phi)
+        w21 = -w12
+        w22 = w11
+        x = [-0.197]   # LocoNets initial state
+        y = [0.0]
+        period = 0
+        # Run until y wraps back (one full cycle)
+        while y[period] >= y[0]:
+            period += 1
+            x.append(math.tanh(w11 * x[period-1] + w12 * y[period-1]))
+            y.append(math.tanh(w22 * y[period-1] + w21 * x[period-1]))
+        while y[period] <= y[0]:
+            period += 1
+            x.append(math.tanh(w11 * x[period-1] + w12 * y[period-1]))
+            y.append(math.tanh(w22 * y[period-1] + w21 * x[period-1]))
+        self._period = period
+        x_arr = np.array(x, dtype=np.float32)
+        y_arr = np.array(y, dtype=np.float32)
 
-        # Shared phase angle (scalar) — identical across all envs
+        # 2. Sample RBF centers FROM the trajectory at evenly-spaced time indices
+        ci = np.linspace(1, period, H + 1, dtype=int)[:-1]
+        cx = x_arr[ci]
+        cy = y_arr[ci]
+
+        # 3. Pre-compute full RBF activation table — KENNE shape: (period+1, H)
+        var = self.cfg.cpg_sigma2
+        kenne = np.zeros((len(x_arr), H), dtype=np.float32)
+        for i in range(H):
+            rx = x_arr - cx[i]
+            ry = y_arr - cy[i]
+            kenne[:, i] = np.exp(-(rx**2 + ry**2) / var)
+        self._KENNE = torch.from_numpy(kenne).to(self.device)   # (period+1, H)
+
+        # 4. Phase offsets per leg, converted to integer step offsets
+        offsets = self.cfg.phase_offsets or [0.0, math.pi, math.pi/2, 3*math.pi/2]
+        # Convert phase (radians) → step offset (integer)
+        # phase_rad / (2π) gives fraction of cycle, × period → steps
+        leg_step_offsets = [int(round((off / (2.0 * math.pi)) * period)) % period
+                            for off in offsets]
+        self._leg_step_offsets = torch.tensor(leg_step_offsets,
+                                              dtype=torch.long, device=self.device)
+
+        # 5. Phase counter (integer, scalar — same for all envs)
+        self._phase_idx: int = 0
+        # Continuous phi tracked separately for rewards / visualization
         self._phi: float = 0.0
+        self._delta_phi = phi
 
-        # RBF centers on unit circle: (H, 2)
-        angles = 2.0 * math.pi * torch.arange(H, device=self.device) / H
-        self._rbf_centers = torch.stack([torch.cos(angles), torch.sin(angles)], dim=1)
-
-        # Phase offsets per leg: (4,)
-        offsets = self.cfg.phase_offsets or [0.0, math.pi, math.pi / 2, 3 * math.pi / 2]
-        self._leg_offsets = torch.tensor(offsets, dtype=torch.float32, device=self.device)
-
-        # Direct encoding (LocoNets-inspired): W maps RBF to ALL 12 joints.
-        # Shape: (num_envs, 20, 12) — 20 RBF neurons × 12 joints
-        # All legs see the SAME RBF activations; W columns differentiate legs.
-        # Columns: [FL_hip, FL_thigh, FL_calf, FR_hip, ..., RR_calf] (CPG order)
-        self._W = torch.zeros(self.num_envs, H, 12, device=self.device)
+        # Indirect encoding: shared W shape (num_envs, 20, 3) — same W for all 4 legs
+        self._W = torch.zeros(self.num_envs, H, 3, device=self.device)
 
     def _reset_cpg(self, env_ids: torch.Tensor):
-        """Reset CPG oscillator state for selected envs."""
-        self._osc_state[env_ids, 0] = 1.0
-        self._osc_state[env_ids, 1] = 0.0
+        """Reset CPG phase index for selected envs."""
+        # Phase is shared across all envs — reset only when ALL envs reset
+        if env_ids is None or len(env_ids) == self.num_envs:
+            self._phase_idx = 0
+            self._phi = 0.0
 
     def _step_cpg_batch(self) -> torch.Tensor:
         """
-        Direct encoding (LocoNets-inspired): all legs see same RBF, W differentiates.
-
-        Steps:
-          1. Step SO(2) oscillator.
-          2. Normalise to unit circle.
-          3. Compute RBF activations (same for all legs — no phase rotation).
-          4. Multiply by W: (num_envs, 20) × (num_envs, 20, 12) → (num_envs, 12).
-          5. Apply tanh → bounded [-1, 1] rad.
-          6. Reorder from CPG joint order to Isaac Lab joint order.
-
-        Returns:
-            joint_targets: (num_envs, 12) in Isaac Lab order, bounded by tanh.
+        Pre-computed CPG (LocoNets approach) with per-leg phase offsets.
+        Indirect encoding: all 4 legs share the SAME W (20, 3).
+        Per-leg timing comes entirely from integer phase-step offsets.
         """
-        alpha = self.cfg.cpg_alpha
-        freq = self.cfg.cpg_freq
-        control_dt = self.cfg.sim.dt * self.cfg.decimation
+        # Per-leg phase indices: (4,) long in [0, period)
+        leg_idx = (self._phase_idx + self._leg_step_offsets) % self._period
+        rbf_legs = self._KENNE[leg_idx]          # (4, H)
 
-        # 1. Step oscillator
-        cos_phi = math.cos(self._phi)
-        sin_phi = math.sin(self._phi)
-        R = alpha * torch.tensor(
-            [[cos_phi, sin_phi], [-sin_phi, cos_phi]],
-            dtype=torch.float32, device=self.device,
-        )
-        self._osc_state = torch.tanh(self._osc_state @ R.T)
-        self._phi += 2.0 * math.pi * freq * control_dt
+        # Shared W: (E, H, 3) — applied identically to each leg
+        # rbf_legs @ W → (E, 4, 3), then flatten to (E, 12)
+        raw = torch.einsum("kn,enj->ekj", rbf_legs, self._W)   # (E, 4, 3)
+        out = raw.reshape(self._W.shape[0], 12)
+        cpg_flat = torch.tanh(out)
 
-        # 2. Normalise to unit circle
-        norm = self._osc_state.norm(dim=1, keepdim=True).clamp(min=1e-6)
-        osc_n = self._osc_state / norm   # (num_envs, 2)
+        # Advance integer phase
+        self._phase_idx = (self._phase_idx + 1) % self._period
+        self._phi += self._delta_phi
 
-        # 3. RBF activations — SAME for all legs (no phase rotation)
-        # osc_n: (num_envs, 2), centers: (H, 2) → diff: (num_envs, H, 2)
-        diff = osc_n.unsqueeze(1) - self._rbf_centers.unsqueeze(0)
-        dist2 = (diff ** 2).sum(dim=2)                # (num_envs, H)
-        rbf = torch.exp(-dist2 / self.cfg.cpg_sigma2) # (num_envs, H)
-
-        # 4. Direct W mapping: rbf @ W → 12 joint outputs
-        # rbf: (num_envs, H), W: (num_envs, H, 12) → (num_envs, 12)
-        raw = torch.einsum("en,enj->ej", rbf, self._W)
-
-        # 5. tanh clamps output to [-1, 1] rad — prevents W explosion
-        cpg_flat = torch.tanh(raw)
-
-        # 6. Reorder CPG order → Isaac Lab order
         return cpg_flat[:, self._joint_perm]
 
     # ------------------------------------------------------------------
@@ -346,29 +362,26 @@ class UnitreeB1Env(DirectRLEnv):
         Set the same W matrix for all parallel environments.
 
         Args:
-            W: (20, 12) direct encoding weight matrix.
+            W: (20, 3) indirect-encoding weight matrix (hip/thigh/calf).
         """
         H = self.cfg.cpg_num_rbf
-        assert W.shape == (H, 12), f"Expected W shape ({H}, 12), got {W.shape}"
+        assert W.shape == (H, 3), f"Expected W shape ({H}, 3), got {W.shape}"
         W_t = torch.tensor(W, dtype=torch.float32, device=self.device)
-        self._W[:] = W_t.unsqueeze(0)   # broadcast to all envs
+        self._W[:] = W_t.unsqueeze(0)
 
     def set_weights_batch(self, W_batch: np.ndarray):
         """
-        Set a different W matrix for each environment.
-
         Args:
-            W_batch: (num_envs, 20, 12) numpy array.
+            W_batch: (num_envs, 20, 3) numpy array.
         """
         H = self.cfg.cpg_num_rbf
         N = self.num_envs
-        assert W_batch.shape == (N, H, 12), (
-            f"Expected W_batch shape ({N}, {H}, 12), got {W_batch.shape}"
+        assert W_batch.shape == (N, H, 3), (
+            f"Expected W_batch shape ({N}, {H}, 3), got {W_batch.shape}"
         )
         self._W = torch.tensor(W_batch, dtype=torch.float32, device=self.device)
 
     def get_weights(self) -> np.ndarray:
-        """Return W from env 0 as (20, 12) numpy array."""
         return self._W[0].cpu().numpy()
 
     # ------------------------------------------------------------------
@@ -376,7 +389,7 @@ class UnitreeB1Env(DirectRLEnv):
     # ------------------------------------------------------------------
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        """Compute CPG joint targets. External actions are ignored for Phase 1."""
+        """Compute CPG joint targets. External actions ignored for Phase 1 PIBB."""
         self._prev_joint_targets = self._joint_targets.clone() if hasattr(self, '_joint_targets') else torch.zeros(self.num_envs, 12, device=self.device)
         self._joint_targets = self._step_cpg_batch()  # (num_envs, 12)
 

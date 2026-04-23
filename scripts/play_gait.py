@@ -223,15 +223,21 @@ if vx_history:
     print(f"    mean={abs(vz_arr).mean():.3f}  max={abs(vz_arr).max():.3f}  "
           f"(0=no bounce)")
 
-    # W matrix info — direct encoding (20, 12): 4 legs × 3 joints
-    print(f"\n  W matrix (direct {W.shape[0]}×{W.shape[1]}):")
+    # W matrix info
+    print(f"\n  W matrix ({W.shape[0]}×{W.shape[1]}):")
     print(f"    total norm={np.linalg.norm(W):.3f}")
-    for k, leg in enumerate(["FL", "FR", "RL", "RR"]):
-        cols = slice(k*3, k*3+3)
-        h_max = np.degrees(np.abs(W[:, k*3]).max())
-        t_max = np.degrees(np.abs(W[:, k*3+1]).max())
-        c_max = np.degrees(np.abs(W[:, k*3+2]).max())
-        print(f"    {leg}: hip={h_max:.1f}°  thigh={t_max:.1f}°  calf={c_max:.1f}°")
+    if W.shape[1] == 3:
+        # Indirect encoding: shared W for all legs
+        for j, jn in enumerate(["hip", "thigh", "calf"]):
+            print(f"    {jn}: max={np.degrees(np.abs(W[:, j]).max()):.1f}°  "
+                  f"norm={np.linalg.norm(W[:, j]):.3f}")
+    else:
+        # Direct encoding: per-leg columns
+        for k, leg in enumerate(["FL", "FR", "RL", "RR"]):
+            h_max = np.degrees(np.abs(W[:, k*3]).max())
+            t_max = np.degrees(np.abs(W[:, k*3+1]).max())
+            c_max = np.degrees(np.abs(W[:, k*3+2]).max())
+            print(f"    {leg}: hip={h_max:.1f}°  thigh={t_max:.1f}°  calf={c_max:.1f}°")
 
 print(sep)
 
