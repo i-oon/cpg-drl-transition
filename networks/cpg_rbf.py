@@ -132,19 +132,23 @@ class CPGRBFNetwork:
     # ------------------------------------------------------------------
 
     def _step_oscillator(self):
-        """Update oscillator state: o(t+1) = tanh(α·R(φ) @ o(t)), then φ += 2πf·dt."""
-        cos_phi = float(np.cos(self._phi))
-        sin_phi = float(np.sin(self._phi))
+        """Update oscillator state: o(t+1) = tanh(α·R(Δφ) @ o(t)), then φ += Δφ.
 
-        # Rotation matrix scaled by alpha
+        Uses FIXED rotation angle Δφ per step (not accumulated φ).
+        The SO(2) oscillator applies the same rotation at every step.
+        """
+        delta_phi = 2.0 * np.pi * self.freq * self.dt   # fixed per step
+        cos_dp = float(np.cos(delta_phi))
+        sin_dp = float(np.sin(delta_phi))
+
         R = self.alpha * torch.tensor(
-            [[cos_phi,  sin_phi],
-             [-sin_phi, cos_phi]],
+            [[cos_dp,  sin_dp],
+             [-sin_dp, cos_dp]],
             dtype=torch.float32,
             device=self.device,
         )
         self._osc_state = torch.tanh(R @ self._osc_state)
-        self._phi += 2.0 * np.pi * self.freq * self.dt
+        self._phi += delta_phi   # track accumulated phase for offsets
 
     def _rotate_state(self, theta: float) -> tuple[torch.Tensor, torch.Tensor]:
         """

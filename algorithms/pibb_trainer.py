@@ -75,9 +75,32 @@ class PIBBTrainer:
         # Same W drives all 4 legs; per-leg timing comes from CPG phase offsets.
         self.num_joints: int = 3
 
-        # Current best W — random init (LocoNets-style, small uniform values)
-        self.W = np.random.uniform(-0.1, 0.1,
-            (self.num_rbf, self.num_joints)).astype(np.float32)
+        # Current best W — init strategy selectable from config
+        #   "random"  : uniform(-0.1, 0.1)                 (LocoNets-style)
+        #   "cosine"  : Thor-style walking prior on thigh/calf so the robot
+        #               walks from iteration 1 and PIBB just refines.
+        init_mode = pibb.get("init_mode", "random")
+        if init_mode == "cosine":
+            H = self.num_rbf
+            angles = 2.0 * np.pi * np.arange(H) / H
+            W = np.zeros((H, self.num_joints), dtype=np.float32)
+            # hip:   zero (side-to-side lateral, let PIBB discover)
+            # thigh: cos(θ) × 0.05 → ±12° fore/aft swing
+            # calf:  sin(θ) × 0.04 → ±9° foot clearance, LAGS thigh by 90°
+            #        so calf is extended (foot planted) during stance
+            #        and flexed (foot lifted) during swing.
+            # (RBF overlap inflates raw ~4×; tuned amplitudes produce the
+            #  CLAUDE.md target of ±12°/±9° post-tanh on the KENNE trajectory.
+            #  Earlier version used cos(θ+π/2) = −sin(θ) — phase-inverted,
+            #  caused stepping-in-place with net-zero stride.)
+            W[:, 1] = 0.05 * np.cos(angles)
+            W[:, 2] = 0.04 * np.sin(angles)
+            self.W = W
+            logger.info("W_init: cosine walking prior (thigh=0.20, calf=0.15)")
+        else:
+            self.W = np.random.uniform(-0.1, 0.1,
+                (self.num_rbf, self.num_joints)).astype(np.float32)
+            logger.info("W_init: random uniform(-0.1, 0.1)")
 
         # Running noise std
         self.sigma: float = self.noise_init
