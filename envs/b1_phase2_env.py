@@ -123,8 +123,14 @@ class B1Phase2Env(DirectRLEnv):
 
         self._last_residual = delta_alpha.detach()
 
-        # --- α_baseline (linear ramp) ---
-        alpha_baseline = ramp_progress.clamp(0.0, 1.0)  # (E,)
+        # --- α_baseline schedule ---
+        # "linear":      α = clamp(ramp_progress, 0, 1)              constant dα/dt
+        # "smoothstep":  α = 3x² − 2x³ on x = clamp(ramp_progress)   dα/dt = 0 at both endpoints
+        x = ramp_progress.clamp(0.0, 1.0)
+        if self.cfg.alpha_schedule == "smoothstep":
+            alpha_baseline = x * x * (3.0 - 2.0 * x)  # (E,)
+        else:
+            alpha_baseline = x  # linear
 
         # --- Query each base policy with ITS OWN previous action ---
         # Each policy was trained with last_action = its own previous output.
@@ -175,10 +181,14 @@ class B1Phase2Env(DirectRLEnv):
         gait_current_oh = torch.nn.functional.one_hot(self._gait_current, num_classes=n_gaits).float()
         gait_target_oh = torch.nn.functional.one_hot(self._gait_target, num_classes=n_gaits).float()
 
-        # α_baseline + cycles_elapsed scalars
+        # α_baseline + cycles_elapsed scalars (must match _apply_action's schedule)
         t = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
         ramp_progress = (t - self._transition_start_s) / self.cfg.transition_duration_s
-        alpha_baseline = ramp_progress.clamp(0.0, 1.0).unsqueeze(1)
+        x = ramp_progress.clamp(0.0, 1.0)
+        if self.cfg.alpha_schedule == "smoothstep":
+            alpha_baseline = (x * x * (3.0 - 2.0 * x)).unsqueeze(1)
+        else:
+            alpha_baseline = x.unsqueeze(1)
         cycles_elapsed = (t / 1.0).unsqueeze(1)                   # 1 Hz CPG-equivalent
 
         obs = torch.cat([
@@ -200,8 +210,14 @@ class B1Phase2Env(DirectRLEnv):
         track_lin = torch.exp(-lin_vel_error / 0.25) * cfg.rew_track_lin_vel
         track_ang = torch.exp(-ang_vel_error / 0.25) * cfg.rew_track_ang_vel
 
-        # Orientation (penalize tilt)
-        orient = torch.sum(d.projected_gravity_b[:, :2] ** 2, dim=1) * cfg.rew_orientation
+        # Orientation (penalize tilt) — v6: in-window multiplier so the MLP
+        # gets stronger gradient to spend Δα on tilt suppression DURING the
+        # transition window, where the gait kinematics fight body stability.
+        t_now = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
+        ramp_progress_r = (t_now - self._transition_start_s) / self.cfg.transition_duration_s
+        in_window_r = ((ramp_progress_r > 0.0) & (ramp_progress_r < 1.0)).float()
+        orient_weight = cfg.rew_orientation * (1.0 + cfg.transition_orientation_boost * in_window_r)
+        orient = torch.sum(d.projected_gravity_b[:, :2] ** 2, dim=1) * orient_weight
 
         # Height (penalize deviation from target)
         height_err = (d.root_pos_w[:, 2] - cfg.target_height) ** 2 * cfg.rew_height
@@ -210,6 +226,10 @@ class B1Phase2Env(DirectRLEnv):
         action_rate = torch.sum((self._last_residual - getattr(self, "_prev_residual",
                                                                  self._last_residual)) ** 2, dim=1) * cfg.rew_action_rate
         self._prev_residual = self._last_residual
+
+        # Joint-acceleration L2 (v5 polish: suppress joint-target jerk → smooth
+        # transitions, lower tilt spikes at switch instants)
+        joint_acc = torch.sum(d.joint_acc ** 2, dim=1) * cfg.rew_joint_acc
 
         # Alive bonus
         alive = torch.full_like(track_lin, cfg.rew_alive)
@@ -221,7 +241,7 @@ class B1Phase2Env(DirectRLEnv):
         # tracking/orientation rewards it enables.
         sparsity = torch.sum(self._last_residual ** 2, dim=1) * cfg.rew_residual_sparsity
 
-        return track_lin + track_ang + orient + height_err + action_rate + alive + sparsity
+        return track_lin + track_ang + orient + height_err + action_rate + joint_acc + alive + sparsity
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (terminated, truncated)."""

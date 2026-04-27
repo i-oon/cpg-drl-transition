@@ -3,8 +3,7 @@ __pycache__/
 *.pyo
 
 # Training artifacts (weights are large, keep only final ones via LFS or separate)
-weights/*_iter*.npy
-weights/*_init.npy
+weights/
 IsaacLab-LocoNets/
 .vscode/
 *.code-workspace

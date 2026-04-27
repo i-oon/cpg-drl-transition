@@ -134,6 +134,10 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     transition_start_min_s: float = 1.5      # min current-gait stance hold
     transition_start_max_s: float = 3.5      # max current-gait stance hold
     transition_duration_s: float = 3.0       # α_baseline ramp duration (deterministic)
+    # v7: α_baseline schedule — "linear" (constant dα/dt) or "smoothstep"
+    # (Hermite 3x²−2x³, derivative=0 at both endpoints → smoother kinematic
+    # blend, especially near α=1 where the linear ramp produced tilt spikes).
+    alpha_schedule: str = "smoothstep"       # "linear" | "smoothstep"
 
     # Δα bounding via tanh.
     # v1 (max=0.2): too tight, MLP saturated and stood still.
@@ -161,8 +165,20 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     rew_track_lin_vel: float = 1.5
     rew_track_ang_vel: float = 0.75
     rew_orientation: float = -2.0
+    # v6 polish: orientation penalty multiplier applied DURING the transition
+    # window only (so the MLP sees a strong gradient to suppress mid-window
+    # tilt spikes; steady-state orientation pressure stays at 1×).
+    # Effective in-window weight = rew_orientation × (1 + transition_orientation_boost).
+    transition_orientation_boost: float = 3.0
     rew_height: float = -50.0
-    rew_action_rate: float = -0.05           # per-leg Δα step-to-step smoothness
+    # v5 polish: tightened from -0.05 → -0.15 to suppress Δα jitter at switch
+    # instants (was the source of v4's tilt spikes).
+    rew_action_rate: float = -0.15           # per-leg Δα step-to-step smoothness
+    # v5 polish: joint-acceleration L2 — directly penalizes joint-target jerk
+    # → smoother transitions, lower tilt spikes. Matches Phase 1 stock
+    # dof_acc_l2 magnitude (-1.25e-7) doubled to actually shape Phase 2's
+    # policy (which only has the 4-D residual to act on).
+    rew_joint_acc: float = -2.5e-7
     rew_alive: float = 0.5                   # bonus per step alive
     # |Δα|² penalty — bumped -0.5 → -3.0 to keep the residual near zero
     # even WITHIN the transition window unless it's actively earning its
