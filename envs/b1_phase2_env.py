@@ -26,7 +26,11 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sensors import ContactSensor
 from rsl_rl.runners import OnPolicyRunner
 
-from envs.b1_phase2_env_cfg import B1Phase2EnvCfg
+from envs.b1_phase2_env_cfg import (
+    B1Phase2EnvCfg,
+    B1Phase2Residual1DEnvCfg,
+    B1Phase2E2ERateEnvCfg,
+)
 from envs.b1_velocity_ppo_cfg import B1FlatPPORunnerCfg
 
 
@@ -61,6 +65,8 @@ class B1Phase2Env(DirectRLEnv):
         self._gait_current = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._gait_target = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
         self._last_residual = torch.zeros(self.num_envs, 4, device=self.device)
+        # Integrated α for e2e_rate mode — starts at 0, rises monotonically each step
+        self._alpha_integrated = torch.zeros(self.num_envs, device=self.device)
         # Per-env transition start time, sampled at reset for robustness
         self._transition_start_s = torch.full(
             (self.num_envs,), float(cfg.transition_start_min_s), device=self.device,
@@ -77,10 +83,18 @@ class B1Phase2Env(DirectRLEnv):
             len(self._base_policies), self.num_envs, 12, device=self.device,
         )
 
-        # Trunk / feet body indices for reward & termination
-        names = self._robot.body_names
-        self._trunk_idx = names.index("trunk")
-        self._foot_ids = [names.index(n) for n in ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]]
+        # Trunk / feet body indices — resolved against the CONTACT SENSOR's body
+        # ordering, not the robot articulation's body list. The two orderings can
+        # differ (sensor resolves from USD prim paths; articulation from joint tree).
+        # Using robot.body_names indices here was the root cause of empty gait
+        # diagrams in play_b1_phase2.py.
+        foot_ids_raw, foot_names = self._contact_sensor.find_bodies(".*_foot$")
+        desired_feet = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+        perm = [foot_names.index(n) for n in desired_feet]
+        self._foot_ids = [foot_ids_raw[i] for i in perm]
+
+        trunk_ids, _ = self._contact_sensor.find_bodies("trunk")
+        self._trunk_idx = trunk_ids[0]
 
         # Default joint position (cached for action assembly)
         self._default_joint_pos = self._robot.data.default_joint_pos.clone()
@@ -107,30 +121,57 @@ class B1Phase2Env(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Called once per control step (before decimated physics steps).
         Build base-policy obs, query both policies, blend per leg, apply."""
-        # --- Δα residual (clamped via tanh × delta_alpha_max) ---
-        delta_alpha = torch.tanh(actions) * self.cfg.delta_alpha_max  # (E, 4)
-
-        # --- Hard time-gate the residual ---
-        # Δα is forced to zero OUTSIDE the transition window. This guarantees
-        # the source gait runs untouched during the hold phase (α_baseline=0)
-        # and the target gait runs untouched after the ramp (α_baseline=1).
-        # The MLP can only intervene during the ramp itself.
         t = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
         ramp_progress = (t - self._transition_start_s) / self.cfg.transition_duration_s
-        pad = self.cfg.residual_window_padding_s / self.cfg.transition_duration_s
-        in_window = ((ramp_progress > -pad) & (ramp_progress < 1.0 + pad)).float()
-        delta_alpha = delta_alpha * in_window.unsqueeze(1)  # (E, 4) — zeroed outside window
 
-        self._last_residual = delta_alpha.detach()
+        control_dt = self.cfg.sim.dt * self.cfg.decimation
 
-        # --- α_baseline schedule ---
-        # "linear":      α = clamp(ramp_progress, 0, 1)              constant dα/dt
-        # "smoothstep":  α = 3x² − 2x³ on x = clamp(ramp_progress)   dα/dt = 0 at both endpoints
-        x = ramp_progress.clamp(0.0, 1.0)
-        if self.cfg.alpha_schedule == "smoothstep":
-            alpha_baseline = x * x * (3.0 - 2.0 * x)  # (E,)
+        if self.cfg.alpha_schedule == "e2e":
+            # E2E baseline: MLP outputs a single α scalar, applied uniformly.
+            # No hand-designed ramp; no time-gating; no residual structure.
+            alpha_scalar = torch.sigmoid(actions[:, 0])           # (E,) ∈ (0, 1)
+            alpha_baseline = alpha_scalar
+            delta_alpha = torch.zeros(self.num_envs, 4, device=self.device)
+            self._last_residual = delta_alpha.detach()
+        elif self.cfg.alpha_schedule == "e2e_rate":
+            # E2E rate-based: MLP outputs dα/dt via sigmoid, α integrates from 0.
+            # rate ∈ [0, 1/transition_duration_s] so at max rate α reaches 1 in
+            # exactly transition_duration_s seconds — same horizon as the residual.
+            # Structurally prevents instant α=1 collapse (α must accumulate step by step).
+            rate = torch.sigmoid(actions[:, 0]) / self.cfg.transition_duration_s
+            self._alpha_integrated = (self._alpha_integrated + rate * control_dt).clamp(0.0, 1.0)
+            alpha_baseline = self._alpha_integrated
+            delta_alpha = torch.zeros(self.num_envs, 4, device=self.device)
+            self._last_residual = delta_alpha.detach()
         else:
-            alpha_baseline = x  # linear
+            # --- Δα residual (clamped via tanh × delta_alpha_max) ---
+            # Supports both 4-D per-leg (action_space=4) and 1-D scalar broadcast
+            # (action_space=1, Residual-1D ablation). The 1-D case applies the
+            # same Δα to all four legs for a direct comparison with Residual-4D.
+            if actions.shape[1] == 1:
+                delta_alpha = torch.tanh(actions[:, 0:1]) * self.cfg.delta_alpha_max
+                delta_alpha = delta_alpha.expand(self.num_envs, 4)   # (E, 4) broadcast
+            else:
+                delta_alpha = torch.tanh(actions) * self.cfg.delta_alpha_max  # (E, 4)
+
+            # --- Hard time-gate the residual ---
+            # Δα is forced to zero OUTSIDE the transition window. This guarantees
+            # the source gait runs untouched during the hold phase (α_baseline=0)
+            # and the target gait runs untouched after the ramp (α_baseline=1).
+            # The MLP can only intervene during the ramp itself.
+            pad = self.cfg.residual_window_padding_s / self.cfg.transition_duration_s
+            in_window = ((ramp_progress > -pad) & (ramp_progress < 1.0 + pad)).float()
+            delta_alpha = delta_alpha * in_window.unsqueeze(1)  # (E, 4) — zeroed outside window
+            self._last_residual = delta_alpha.detach()
+
+            # --- α_baseline schedule ---
+            # "linear":      α = clamp(ramp_progress, 0, 1)             constant dα/dt
+            # "smoothstep":  α = 3x²−2x³                                dα/dt=0 at endpoints
+            x = ramp_progress.clamp(0.0, 1.0)
+            if self.cfg.alpha_schedule == "smoothstep":
+                alpha_baseline = x * x * (3.0 - 2.0 * x)  # (E,)
+            else:
+                alpha_baseline = x  # linear
 
         # --- Query each base policy with ITS OWN previous action ---
         # Each policy was trained with last_action = its own previous output.
@@ -154,7 +195,15 @@ class B1Phase2Env(DirectRLEnv):
         # delta_alpha shape (E, 4) → expand to per-joint (E, 12) by repeat-3
         delta_per_joint = delta_alpha.repeat_interleave(3, dim=1)        # (E, 12)
         alpha_per_joint = (alpha_baseline.unsqueeze(1) + delta_per_joint).clamp(0.0, 1.0)
+        alpha_baseline_per_joint = alpha_baseline.unsqueeze(1).expand_as(alpha_per_joint).clamp(0.0, 1.0)
         blended = (1 - alpha_per_joint) * action_current + alpha_per_joint * action_target
+
+        # Cache intermediates for play-script inspection
+        self._last_action_current = action_current.detach()      # (E, 12) π_current raw output
+        self._last_action_target  = action_target.detach()       # (E, 12) π_target raw output
+        self._last_alpha_per_joint = alpha_per_joint.detach()    # (E, 12) actual α used (with Δα)
+        self._last_alpha_baseline_per_joint = alpha_baseline_per_joint.detach()  # (E, 12) schedule-only α
+        self._last_blended = blended.detach()                    # (E, 12) final blended action
 
         # --- Joint targets ---
         joint_target = self._default_joint_pos + self.cfg.action_scale * blended
@@ -185,7 +234,10 @@ class B1Phase2Env(DirectRLEnv):
         t = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
         ramp_progress = (t - self._transition_start_s) / self.cfg.transition_duration_s
         x = ramp_progress.clamp(0.0, 1.0)
-        if self.cfg.alpha_schedule == "smoothstep":
+        if self.cfg.alpha_schedule == "e2e":
+            # No hand-designed baseline visible to E2E MLP — it must infer timing
+            alpha_baseline = torch.zeros(self.num_envs, 1, device=self.device)
+        elif self.cfg.alpha_schedule == "smoothstep":
             alpha_baseline = (x * x * (3.0 - 2.0 * x)).unsqueeze(1)
         else:
             alpha_baseline = x.unsqueeze(1)
@@ -287,8 +339,9 @@ class B1Phase2Env(DirectRLEnv):
         self._gait_current[env_ids] = cur
         self._gait_target[env_ids] = tgt
 
-        # Reset residual buffer
+        # Reset residual and integrated-α buffers
         self._last_residual[env_ids] = 0.0
+        self._alpha_integrated[env_ids] = 0.0
 
         # Reset per-policy last-action history for these envs.
         # New episode → no prior policy output → start fresh at zero.
@@ -372,5 +425,35 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2EnvCfg",
         "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-E2E-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2E2EEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2E2EPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-Residual1D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2Residual1DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2Residual1DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-E2E-Rate-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2E2ERateEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2E2ERatePPORunnerCfg",
     },
 )

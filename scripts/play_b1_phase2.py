@@ -23,7 +23,14 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Play B1 Phase 2 transition policy")
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--task", type=str, default="Isaac-B1-Phase2-Transition-v0")
-parser.add_argument("--checkpoint", type=str, required=True)
+parser.add_argument("--checkpoint", type=str, default=None,
+                    help="Checkpoint path. Not required when --baseline is set.")
+parser.add_argument("--baseline", type=str, default=None,
+                    choices=["linear_ramp", "smoothstep_ramp", "discrete"],
+                    help="Run a no-training baseline instead of a learned policy.\n"
+                         "  linear_ramp    — pure hand-designed linear α ramp, Δα≡0\n"
+                         "  smoothstep_ramp — same with smoothstep α schedule (v7 schedule)\n"
+                         "  discrete       — instant α=1 at switch time, no ramp")
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--steps", type=int, default=2000)
 parser.add_argument("--gait_pairs", type=str, default="trot,bound,pace",
@@ -48,6 +55,8 @@ parser.add_argument("--cam_eye", type=str, default="2.5,2.5,1.5",
                     help="Camera position relative to tracked robot (x,y,z) [m].")
 parser.add_argument("--cam_lookat", type=str, default="0.0,0.0,0.5",
                     help="Camera lookat offset from tracked robot (x,y,z) [m].")
+parser.add_argument("--seed", type=int, default=42,
+                    help="RNG seed for env domain randomization. Fix across baselines for fair comparison.")
 args = parser.parse_args()
 
 # Video implies headless cameras
@@ -63,10 +72,19 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+
 import isaaclab_tasks  # noqa: F401
 import envs.b1_phase2_env  # noqa: F401
-from envs.b1_phase2_env_cfg import B1Phase2EnvCfg
-from envs.b1_velocity_ppo_cfg import Phase2PPORunnerCfg
+from envs.b1_phase2_env_cfg import (
+    B1Phase2EnvCfg, B1Phase2E2EEnvCfg,
+    B1Phase2Residual1DEnvCfg, B1Phase2E2ERateEnvCfg,
+)
+from envs.b1_velocity_ppo_cfg import (
+    Phase2PPORunnerCfg, Phase2E2EPPORunnerCfg,
+    Phase2Residual1DPPORunnerCfg, Phase2E2ERatePPORunnerCfg,
+)
 from isaaclab.envs.common import ViewerCfg
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
@@ -76,11 +94,19 @@ from rsl_rl.runners import OnPolicyRunner
 # Build env
 # ---------------------------------------------------------------------------
 
-agent_cfg = Phase2PPORunnerCfg()
-
-env_cfg = B1Phase2EnvCfg()
+_task_cfg_map = {
+    "Isaac-B1-Phase2-E2E-v0":        (Phase2E2EPPORunnerCfg,      B1Phase2E2EEnvCfg),
+    "Isaac-B1-Phase2-Residual1D-v0": (Phase2Residual1DPPORunnerCfg, B1Phase2Residual1DEnvCfg),
+    "Isaac-B1-Phase2-E2E-Rate-v0":   (Phase2E2ERatePPORunnerCfg,   B1Phase2E2ERateEnvCfg),
+}
+_runner_cls, _env_cls = _task_cfg_map.get(
+    args.task, (Phase2PPORunnerCfg, B1Phase2EnvCfg)
+)
+agent_cfg = _runner_cls()
+env_cfg = _env_cls()
 env_cfg.scene.num_envs = args.num_envs
 env_cfg.sim.device = agent_cfg.device
+env_cfg.seed = args.seed
 
 # Legacy 4-gait config (v1, v2 — when steer was still in the portfolio)
 if args.legacy_4gait:
@@ -93,6 +119,19 @@ if args.legacy_4gait:
         "logs/phase1_final/steer.pt",
     )
     print("  [legacy_4gait] obs=47, gaits=trot/bound/pace/steer")
+
+# Validate args
+if args.baseline is None and args.checkpoint is None:
+    print("ERROR: either --checkpoint or --baseline must be specified.")
+    sys.exit(1)
+
+# Baseline mode: override alpha_schedule
+if args.baseline == "linear_ramp":
+    env_cfg.alpha_schedule = "linear"
+elif args.baseline == "smoothstep_ramp":
+    env_cfg.alpha_schedule = "smoothstep"
+elif args.baseline == "discrete":
+    env_cfg.alpha_schedule = "linear"   # discrete overrides α at switch time in the loop
 
 # Camera follows env 0's robot
 cam_eye = tuple(float(x) for x in args.cam_eye.split(","))
@@ -126,13 +165,20 @@ if args.video:
 env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
 # ---------------------------------------------------------------------------
-# Load policy
+# Load policy  (skipped for no-training baselines)
 # ---------------------------------------------------------------------------
 
-runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None,
-                        device=agent_cfg.device)
-runner.load(args.checkpoint)
-policy = runner.get_inference_policy(device=agent_cfg.device)
+if args.baseline is not None:
+    # No-training baseline: send zeros as actions → Δα=0 (tanh(0)=0)
+    _n_actions = env.num_actions
+    _device    = agent_cfg.device
+    policy = lambda obs: torch.zeros(obs.shape[0], _n_actions, device=_device)
+    print(f"  [baseline={args.baseline}] No checkpoint loaded — using zero actions (Δα≡0).")
+else:
+    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None,
+                            device=agent_cfg.device)
+    runner.load(args.checkpoint)
+    policy = runner.get_inference_policy(device=agent_cfg.device)
 
 # ---------------------------------------------------------------------------
 # Build gait switch schedule
@@ -152,7 +198,9 @@ for g in gait_seq:
 control_dt = env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
 switch_steps = int(args.switch_interval_s / control_dt)
 
+method_label = args.baseline if args.baseline else f"residual({Path(args.checkpoint).parent.name})"
 print(f"\n  Task          : {args.task}")
+print(f"  Method        : {method_label}")
 print(f"  Checkpoint    : {args.checkpoint}")
 print(f"  Envs          : {env.num_envs}")
 print(f"  Steps         : {args.steps}  ({args.steps * control_dt:.1f}s)")
@@ -181,8 +229,17 @@ torque_hist = []              # (T, 12)
 power_inst_hist = []          # (T,) Σ|τ·q̇|
 x_pos_hist = []               # (T,) world x for distance integration
 switch_step_marks = []        # control-step indices when a switch fired
+contact_hist = []             # (T, 4) bool — FL FR RL RR stance/swing
+action_current_hist = []     # (T, 12) π_current raw output
+action_target_hist = []      # (T, 12) π_target raw output
+alpha_hist = []               # (T, 12) actual per-joint α (with Δα)
+alpha_baseline_hist = []     # (T, 12) schedule-only α (without Δα)
+blended_hist = []             # (T, 12) final blended action sent to robot
+ramp_progress_hist = []      # (T,) ramp_progress scalar for env 0
 
 robot = env.unwrapped._robot
+contact_sensor = env.unwrapped._contact_sensor
+foot_ids = env.unwrapped._foot_ids    # [FL, FR, RL, RR] indices into sensor
 e0_idx = 0  # env 0 for verbose printing
 
 # Override env's gait sampling — schedule deterministic transitions
@@ -209,6 +266,15 @@ for step in range(args.steps):
         env.unwrapped.episode_length_buf[:] = 0
         switch_step_marks.append(step)
 
+    # Discrete baseline: force α=1 immediately at/after each switch
+    if args.baseline == "discrete" and step in switch_step_marks:
+        _past_ramp = int(
+            (env.unwrapped.cfg.transition_start_max_s
+             + env.unwrapped.cfg.transition_duration_s + 0.5)
+            / control_dt
+        )
+        env.unwrapped.episode_length_buf[:] = _past_ramp
+
     with torch.no_grad():
         actions = policy(obs)
     obs, reward, dones, extras = env.step(actions)
@@ -228,6 +294,20 @@ for step in range(args.steps):
     tq = d.applied_torque[e0_idx].cpu().numpy()                 # (12,)
     p_inst = float(np.sum(np.abs(tq * jv)))                     # Σ|τ·q̇|  [W]
     x_w = d.root_pos_w[e0_idx, 0].item()
+
+    ct = contact_sensor.data.current_contact_time[e0_idx, foot_ids]
+    contact_hist.append((ct > 0.0).cpu().numpy())   # (4,) bool FL FR RL RR
+
+    eu = env.unwrapped
+    action_current_hist.append(eu._last_action_current[e0_idx].cpu().numpy())
+    action_target_hist.append(eu._last_action_target[e0_idx].cpu().numpy())
+    alpha_hist.append(eu._last_alpha_per_joint[e0_idx].cpu().numpy())
+    alpha_baseline_hist.append(eu._last_alpha_baseline_per_joint[e0_idx].cpu().numpy())
+    blended_hist.append(eu._last_blended[e0_idx].cpu().numpy())
+    # ramp_progress for this env: used to mark ramp-start and ramp-end
+    t_ep = eu.episode_length_buf[e0_idx].float().item() * control_dt
+    ramp_prog = (t_ep - eu._transition_start_s[e0_idx].item()) / eu.cfg.transition_duration_s
+    ramp_progress_hist.append(ramp_prog)
 
     vx_hist.append(vx); h_hist.append(h); tilt_hist.append(tilt)
     delta_hist.append(delta)
@@ -262,6 +342,25 @@ ja_a = np.array(joint_acc_hist)
 tq_a = np.array(torque_hist)
 p_a  = np.array(power_inst_hist)
 x_a  = np.array(x_pos_hist)
+ac_a  = np.array(action_current_hist)   # (T, 12) π_current raw output
+at_a  = np.array(action_target_hist)    # (T, 12) π_target raw output
+al_a  = np.array(alpha_hist)            # (T, 12) actual α per joint
+alb_a = np.array(alpha_baseline_hist)   # (T, 12) schedule-only α
+bl_a  = np.array(blended_hist)          # (T, 12) final blended action
+rp_a  = np.array(ramp_progress_hist)    # (T,) ramp_progress for env 0
+# Residual joint contribution: how much Δα shifts each joint target
+# = (α_actual − α_baseline) × (π_target − π_current), scaled by action_scale
+residual_joint_a = (al_a - alb_a) * (at_a - ac_a)  # (T, 12), in action units
+residual_joint_scaled_a = residual_joint_a * env_cfg.action_scale  # in radians
+
+# Detect ramp-start (ramp_progress crosses 0 from below) and
+# ramp-end (ramp_progress crosses 1 from below) for vertical line markers.
+ramp_start_times, ramp_end_times = [], []
+for i in range(1, len(rp_a)):
+    if rp_a[i - 1] < 0 <= rp_a[i]:
+        ramp_start_times.append(i * control_dt)
+    if rp_a[i - 1] < 1 <= rp_a[i]:
+        ramp_end_times.append(i * control_dt)
 
 # Cost of Transport over the run
 distance = max(x_a[-1] - x_a[0], 1e-6)              # m
@@ -308,36 +407,123 @@ if args.save_plots:
     #   FL_thigh, FR_thigh, RL_thigh, RR_thigh,
     #   FL_calf, FR_calf, RL_calf, RR_calf
     leg_idx = {"FL": 0, "FR": 1, "RL": 2, "RR": 3}
+    contact_a = np.array(contact_hist)   # (T, 4) bool
 
-    # 1. Joint positions per leg, switch markers
+    # Segment boundaries and labels for annotation
+    seg_boundaries = [0.0] + [s * control_dt for s in switch_step_marks] + [t_axis[-1]]
+    seg_labels = []
+    for j in range(len(seg_boundaries) - 1):
+        seg_idx = j % len(gait_seq)
+        tgt_idx = (seg_idx + 1) % len(gait_seq)
+        seg_labels.append(f"{gait_seq[seg_idx]}→{gait_seq[tgt_idx]}")
+
+    def _draw_phase_lines(ax, label_segments=False):
+        """Vertical lines: red=pair-swap, green=ramp-start, orange=ramp-end.
+        label_segments=True adds gait-pair text at top of each segment."""
+        for s in switch_step_marks:
+            ax.axvline(s * control_dt, ls="--", c="r",  alpha=0.7, lw=1.2, label="_nolegend_")
+        for t in ramp_start_times:
+            ax.axvline(t, ls="--", c="g",  alpha=0.8, lw=1.0, label="_nolegend_")
+        for t in ramp_end_times:
+            ax.axvline(t, ls="--", c="orange", alpha=0.8, lw=1.0, label="_nolegend_")
+        if label_segments:
+            for j, label in enumerate(seg_labels):
+                mid = (seg_boundaries[j] + seg_boundaries[j + 1]) / 2
+                ax.text(mid, 1.01, label, transform=ax.get_xaxis_transform(),
+                        ha="center", va="bottom", fontsize=7.5, color="darkred",
+                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7))
+
+    # 0. Gait diagram — foot contact timing (same style as Phase 1)
+    fig, axes = plt.subplots(2, 1, figsize=(14, 5), sharex=True,
+                             gridspec_kw={"height_ratios": [3, 1]})
+    ax_gait = axes[0]
+    for i, lab in enumerate(["FL", "FR", "RL", "RR"]):
+        stance = contact_a[:, i]
+        ax_gait.fill_between(t_axis, i + 0.1, i + 0.9, where=stance,
+                             color="C0", alpha=0.85, step="post")
+    _draw_phase_lines(ax_gait, label_segments=True)
+    ax_gait.set_yticks([0.5, 1.5, 2.5, 3.5])
+    ax_gait.set_yticklabels(["FL", "FR", "RL", "RR"])
+    ax_gait.invert_yaxis()
+    ax_gait.set_ylabel("foot")
+    ax_gait.set_title(f"Gait diagram — {method_label}  "
+                      f"(red=pair-swap  green=ramp-start  orange=ramp-end)")
+    ax_gait.grid(alpha=0.2)
+    # Bottom panel: vx trace
+    ax_vx = axes[1]
+    ax_vx.plot(t_axis, vx_a, lw=0.8, c="C1")
+    ax_vx.axhline(env_cfg.velocity_cmd_x, ls=":", c="g", lw=1.0, label="cmd vx")
+    _draw_phase_lines(ax_vx, label_segments=True)
+    ax_vx.set_ylabel("vx [m/s]")
+    ax_vx.set_xlabel("time [s]")
+    ax_vx.legend(loc="upper right", fontsize=8)
+    ax_vx.grid(alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(out_dir / "gait_diagram.png", dpi=120)
+    plt.close(fig)
+
+    # 1. Joint positions per leg
     fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
     for ax, (leg, k) in zip(axes, leg_idx.items()):
         ax.plot(t_axis, jp_a[:, k],      label=f"{leg}_hip",   lw=1.0)
         ax.plot(t_axis, jp_a[:, 4 + k],  label=f"{leg}_thigh", lw=1.0)
         ax.plot(t_axis, jp_a[:, 8 + k],  label=f"{leg}_calf",  lw=1.0)
-        for s in switch_step_marks:
-            ax.axvline(s * control_dt, ls="--", c="k", alpha=0.4, lw=0.8)
+        _draw_phase_lines(ax, label_segments=True)
         ax.set_ylabel(f"{leg} [rad]")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(alpha=0.3)
     axes[-1].set_xlabel("time [s]")
-    fig.suptitle("Joint positions per leg — vertical lines = gait switch")
+    fig.suptitle("Joint positions per leg  (red=swap  green=ramp-start  orange=ramp-end)")
     fig.tight_layout()
     fig.savefig(out_dir / "joint_positions.png", dpi=120)
     plt.close(fig)
 
-    # 2. Δα(t) per leg
-    fig, ax = plt.subplots(1, 1, figsize=(12, 4))
+    # 2. Δα(t) per leg + residual joint contribution
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
     for i, lab in enumerate(["FL", "FR", "RL", "RR"]):
-        ax.plot(t_axis, delta_a[:, i], label=f"Δα_{lab}", lw=1.0)
-    for s in switch_step_marks:
-        ax.axvline(s * control_dt, ls="--", c="k", alpha=0.4, lw=0.8)
-    ax.set_xlabel("time [s]"); ax.set_ylabel("Δα")
-    ax.set_title("Per-leg residual α correction (Δα)")
-    ax.legend(loc="upper right"); ax.grid(alpha=0.3)
+        axes[0].plot(t_axis, delta_a[:, i], label=f"Δα_{lab}", lw=1.0)
+    _draw_phase_lines(axes[0], label_segments=True)
+    axes[0].set_ylabel("Δα (per leg)"); axes[0].axhline(0, c="k", lw=0.5)
+    axes[0].set_title("Residual correction  (red=swap  green=ramp-start  orange=ramp-end)")
+    axes[0].legend(loc="upper right", fontsize=8); axes[0].grid(alpha=0.3)
+    colors = ["C0", "C1", "C2", "C3"]
+    joint_types = ["hip", "thigh", "calf"]
+    for k, (leg, col) in enumerate(zip(["FL", "FR", "RL", "RR"], colors)):
+        for j, jt in enumerate(joint_types):
+            jidx = k + j * 4
+            ls = ["-", "--", ":"][j]
+            axes[1].plot(t_axis, residual_joint_scaled_a[:, jidx],
+                         color=col, ls=ls, lw=0.9, label=f"{leg}_{jt}" if k == 0 else None)
+    _draw_phase_lines(axes[1], label_segments=True)
+    axes[1].axhline(0, c="k", lw=0.5)
+    axes[1].set_ylabel("Δjoint [rad]  (residual only)")
+    axes[1].set_xlabel("time [s]"); axes[1].grid(alpha=0.3)
+    axes[1].legend(loc="upper right", fontsize=7, ncol=3)
     fig.tight_layout()
     fig.savefig(out_dir / "delta_alpha.png", dpi=120)
     plt.close(fig)
+
+    # 2b. Source vs target vs blended joint commands
+    # Scale by action_scale so values are in radians (joint offset from default pose)
+    asc = env_cfg.action_scale   # 0.25
+    jt_fullname = {"hip": "hip (abduction)", "thigh": "thigh (flexion)", "calf": "calf (knee)"}
+    for j, jt in enumerate(["hip", "thigh", "calf"]):
+        fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
+        for k, (leg, ax) in enumerate(zip(["FL", "FR", "RL", "RR"], axes)):
+            jidx = k + j * 4
+            ax.plot(t_axis, ac_a[:, jidx] * asc, label="π_current", lw=0.8, alpha=0.7, c="C0")
+            ax.plot(t_axis, at_a[:, jidx] * asc, label="π_target",  lw=0.8, alpha=0.7, c="C1")
+            ax.plot(t_axis, bl_a[:, jidx] * asc, label="blended",   lw=1.2, c="C2")
+            _draw_phase_lines(ax, label_segments=True)
+            ax.set_ylabel(f"{leg}_{jt}\noffset [rad]")
+            ax.legend(loc="upper right", fontsize=7)
+            ax.grid(alpha=0.3)
+        axes[-1].set_xlabel("time [s]")
+        fig.suptitle(f"{jt_fullname[jt]} — joint offset from default pose [rad]  "
+                     f"(red=swap  green=ramp-start  orange=ramp-end)")
+        fig.tight_layout()
+        fig.savefig(out_dir / f"blend_{jt}.png", dpi=120)
+        plt.close(fig)
 
     # 3. Body-state overview
     fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True)
@@ -350,9 +536,8 @@ if args.save_plots:
     axes[2].plot(t_axis, tilt_a, lw=1.0)
     axes[2].set_ylabel("|grav_xy|²"); axes[2].set_xlabel("time [s]"); axes[2].grid(alpha=0.3)
     for ax in axes:
-        for s in switch_step_marks:
-            ax.axvline(s * control_dt, ls="--", c="k", alpha=0.4, lw=0.8)
-    fig.suptitle("Body state — vx, height, tilt")
+        _draw_phase_lines(ax, label_segments=True)
+    fig.suptitle("Body state  (red=swap  green=ramp-start  orange=ramp-end)")
     fig.tight_layout()
     fig.savefig(out_dir / "body_state.png", dpi=120)
     plt.close(fig)

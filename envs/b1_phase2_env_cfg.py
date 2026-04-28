@@ -137,7 +137,9 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # v7: α_baseline schedule — "linear" (constant dα/dt) or "smoothstep"
     # (Hermite 3x²−2x³, derivative=0 at both endpoints → smoother kinematic
     # blend, especially near α=1 where the linear ramp produced tilt spikes).
-    alpha_schedule: str = "smoothstep"       # "linear" | "smoothstep"
+    # "e2e": no hand-designed baseline; MLP outputs full α directly (used by
+    # B1Phase2E2EEnvCfg for the E2E PPO baseline comparison).
+    alpha_schedule: str = "smoothstep"       # "linear" | "smoothstep" | "e2e"
 
     # Δα bounding via tanh.
     # v1 (max=0.2): too tight, MLP saturated and stood still.
@@ -191,3 +193,61 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # Termination
     base_contact_threshold_n: float = 50.0
     bad_orientation_limit: float = 1.0       # |projected_gravity_xy|² limit
+
+
+@configclass
+class B1Phase2E2EEnvCfg(B1Phase2EnvCfg):
+    """E2E PPO baseline — MLP learns the full blending scalar α from scratch.
+
+    Action space is 1-D (single α scalar, same for all 4 legs).
+    No hand-designed baseline ramp; the MLP must infer transition timing
+    from cycles_elapsed and gait one-hot alone.
+
+    Obs: same 45-D as residual, but alpha_baseline is always 0
+         (no baseline signal — MLP must discover the ramp shape).
+    """
+
+    action_space: int = 1
+    alpha_schedule: str = "e2e"
+    rew_residual_sparsity: float = 0.0
+    rew_action_rate: float = -0.15
+
+
+@configclass
+class B1Phase2Residual1DEnvCfg(B1Phase2EnvCfg):
+    """Ablation: scalar residual — 1-D Δα broadcast uniformly to all 4 legs.
+
+    Same smoothstep baseline, same time-gating, same sparsity penalty as
+    residual-4D (v7). The only difference is action_space=1: the MLP outputs
+    a single correction that is applied identically to FL, FR, RL, RR.
+
+    Comparing residual-1D vs residual-4D isolates whether the per-leg
+    asymmetry in Δα is necessary, with all other design choices held fixed.
+    """
+
+    action_space: int = 1
+    # alpha_schedule, delta_alpha_max, time-gating all inherited from B1Phase2EnvCfg
+
+
+@configclass
+class B1Phase2E2ERateEnvCfg(B1Phase2EnvCfg):
+    """E2E rate-based α — MLP outputs dα/dt, α integrated monotonically from 0.
+
+    Action space is 1-D. At each control step:
+        rate   = sigmoid(action) / transition_duration_s   ∈ [0, 1/3 per s]
+        α_t    = clamp(α_{t-1} + rate × dt, 0, 1)
+
+    This forces α to start at 0 at episode start and rise at a speed the
+    MLP controls. Unlike E2E-sigmoid (which can jump α=1 immediately), the
+    integrated design structurally requires genuine multi-step interpolation.
+    The MLP must discover the transition shape (could rediscover smoothstep,
+    or find something better) rather than collapsing to always-target.
+
+    No time-gating (the integral is its own implicit timing structure).
+    No sparsity penalty (MLP needs freedom to control the rate).
+    """
+
+    action_space: int = 1
+    alpha_schedule: str = "e2e_rate"
+    rew_residual_sparsity: float = 0.0
+    rew_action_rate: float = -0.15

@@ -19,6 +19,3 @@ build/
 *.log
 *.tmp
 
-logs/phase1
-logs/phase2
-logs/ppo_b1

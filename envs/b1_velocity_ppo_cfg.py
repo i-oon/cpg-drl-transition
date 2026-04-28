@@ -81,3 +81,59 @@ class Phase2PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class Phase2E2EPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """E2E PPO baseline — learns full blending scalar α from scratch.
+
+    Same backbone as Phase2PPORunnerCfg ([128, 128]) but action_space=1,
+    no residual structure, no hand-designed ramp. Trains from scratch.
+    """
+    num_steps_per_env = 24
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "b1_phase2_e2e"
+    empirical_normalization = False
+
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,                     # from scratch → higher init noise
+        actor_hidden_dims=[128, 128],
+        critic_hidden_dims=[128, 128],
+        activation="elu",
+    )
+
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,                   # standard LR — training from scratch
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class Phase2Residual1DPPORunnerCfg(Phase2PPORunnerCfg):
+    """Ablation: scalar residual (1-D Δα broadcast to all legs).
+
+    Identical to Phase2PPORunnerCfg except experiment_name. Same LR, same
+    network size, same smoothstep baseline — only the action dimension differs.
+    """
+    experiment_name = "b1_phase2_residual1d"
+
+
+@configclass
+class Phase2E2ERatePPORunnerCfg(Phase2E2EPPORunnerCfg):
+    """E2E rate-based α — MLP outputs dα/dt, α integrated from 0.
+
+    Same backbone and LR as Phase2E2EPPORunnerCfg. Training from scratch
+    since the rate-integration structure is a new action semantics.
+    """
+    experiment_name = "b1_phase2_e2e_rate"
