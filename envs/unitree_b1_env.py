@@ -17,6 +17,7 @@ Course: FRA 503 Deep Reinforcement Learning
 
 from __future__ import annotations
 
+import copy
 import math
 from pathlib import Path
 
@@ -34,6 +35,13 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 from isaaclab_assets.robots.unitree import UNITREE_B1_CFG
+
+# Project-local B1 config with correct actuator tuning for 50 kg body.
+# deepcopy prevents mutating the shared isaaclab_assets cfg.
+_UNITREE_B1_CFG = copy.deepcopy(UNITREE_B1_CFG)
+_UNITREE_B1_CFG.actuators["base_legs"].stiffness = 400.0   # 200 sags 9 cm under body weight
+_UNITREE_B1_CFG.actuators["base_legs"].damping   = 10.0    # proportional to stiffness
+_UNITREE_B1_CFG.init_state.pos = (0.0, 0.0, 0.50)         # feet were 7.7 cm underground at 0.42
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +111,7 @@ class UnitreeB1EnvCfg(DirectRLEnvCfg):
     )
 
     # --- Robot ---
-    robot: ArticulationCfg = UNITREE_B1_CFG.replace(
+    robot: ArticulationCfg = _UNITREE_B1_CFG.replace(
         prim_path="/World/envs/env_.*/Robot"
     )
 
@@ -126,26 +134,16 @@ class UnitreeB1EnvCfg(DirectRLEnvCfg):
     gait_name: str = "walk"
     phase_offsets: list = None  # [FL, FR, RL, RR] in radians
 
-    # Leg-to-W-pair mapping: which W slot (0 or 1) each leg uses.
-    # Walk/steer: front/rear split → [0,0,1,1] (FL+FR share, RL+RR share)
-    # Trot: diagonal split → [0,1,1,0] (FL+RR share, FR+RL share)
-    leg_pair_map: list = None  # [FL, FR, RL, RR] → W index (0 or 1)
-
     # --- Reward weights (populated from YAML by make_env_from_config) ---
     reward_w1: float = 1.0           # Forward velocity tracking
     reward_w2: float = 0.5           # Orientation (tilt / flat body)
     reward_w3: float = 0.2           # Height error
-    reward_w4: float = 0.3           # Slippage
-    reward_w5: float = 0.0           # Phase-error (trot) / heading-error (steer)
-    reward_w_gait: float = 2.0       # Phase-locked gait matching
+    reward_w4: float = 0.3           # Vertical bounce
     reward_w_energy: float = 0.01    # Joint velocity penalty
-    reward_w_lin_vel_z: float = 2.0  # Vertical bouncing penalty
-    reward_w_ang_vel_xy: float = 0.05  # Roll/pitch rate penalty
-    reward_w_air_time: float = 0.5    # Feet air time (prevents shuffling)
+    reward_w_air_time: float = 0.5   # Air-time variance (prevents 1-leg shuffle)
     reward_w_action_rate: float = 0.01  # Action smoothness penalty
-    reward_w_joint_pos: float = 0.1  # Default pose bias
     reward_height_nominal: float = 0.42   # B1 standing height (m)
-    reward_target_velocity: float = 0.4   # m/s — walk speed target
+    reward_target_velocity: float = 0.4   # m/s — target forward speed
 
     # --- Action scaling ---
     action_scale: float = 0.25           # CPG output × scale → joint offset (matches Isaac Lab convention)
@@ -394,9 +392,9 @@ class UnitreeB1Env(DirectRLEnv):
         self._joint_targets = self._step_cpg_batch()  # (num_envs, 12)
 
     def _apply_action(self):
-        """Apply tanh-bounded CPG offsets on top of the default standing pose."""
+        """Apply scaled CPG offsets on top of the default standing pose."""
         self._robot.set_joint_position_target(
-            self._robot.data.default_joint_pos + self._joint_targets
+            self._robot.data.default_joint_pos + self.cfg.action_scale * self._joint_targets
         )
 
     def _get_observations(self) -> dict:
@@ -481,58 +479,44 @@ class UnitreeB1Env(DirectRLEnv):
 
     def _reward_simple(self) -> torch.Tensor:
         """
-        Hybrid reward: LocoNets simplicity + B1 stability.
-
-        LocoNets' 6-term reward works for tiny robots that can't fall.
-        B1 (50 kg) needs continuous stability penalties, not just thresholds.
-
-        7 terms: raw vx + 6 penalties (orient, height, bounce, heading, action, torque)
+        Outcome-only reward: velocity + stability + cycling regularity.
+        No gait-specific phase target — coordination emerges from the CPG structure.
         """
-        # Forward velocity — V-shaped: increases up to target, DECREASES above
-        # At 0.4 m/s: reward = 0.4 (peak). At 0.8 m/s: reward = 0.0 (penalized!)
         vx = self._robot.data.root_lin_vel_b[:, 0]
         target = self.cfg.reward_target_velocity
         overshoot = torch.clamp(vx - target, min=0.0)
-        vel_reward = vx - 2.0 * overshoot   # linear up to target, then -1 slope
+        vel_reward = vx - 2.0 * overshoot   # linear up to target, -1 slope above
 
-        # Orientation: continuous penalty (not threshold) — essential for B1
         flat_orient = torch.sum(torch.square(
             self._robot.data.projected_gravity_b[:, :2]
         ), dim=1)
 
-        # Height: keep at 0.42m — prevents lunging/bouncing exploit
         height = self._robot.data.root_pos_w[:, 2]
         height_error = torch.abs(height - self.cfg.reward_height_nominal)
 
-        # Vertical bouncing: critical for B1 (LocoNets robot can't bounce)
         lin_vel_z = torch.square(self._robot.data.root_lin_vel_b[:, 2])
 
-        # Heading: penalise yaw drift
-        yaw_rate = torch.square(self._robot.data.root_ang_vel_b[:, 2])
-
-        # Action rate — smoothness
         action_rate = torch.sum(torch.square(
             self._joint_targets - self._prev_joint_targets
         ), dim=1)
 
-        # Energy proxy: joint velocity squared (torque not reliably available)
         energy = torch.sum(torch.square(self._robot.data.joint_vel), dim=1)
 
-        w1 = float(self.cfg.reward_w1)
-        w2 = float(self.cfg.reward_w2)
-        w3 = float(self.cfg.reward_w3)
-        w4 = float(self.cfg.reward_w4)
-        w5 = float(self.cfg.reward_w5)
-        w_ar = float(self.cfg.reward_w_action_rate)
-        w_e = float(self.cfg.reward_w_energy)
+        # Air-time variance — penalise 1-leg shuffle (all 4 feet should cycle at similar rates)
+        air_var = torch.zeros(self.num_envs, device=self.device)
+        if self._contact_sensor is not None and self._foot_ids is not None:
+            foot_ids = self._foot_ids.cpu().tolist() if isinstance(self._foot_ids, torch.Tensor) else list(self._foot_ids)
+            air_times = self._contact_sensor.data.last_air_time[:, foot_ids].float()
+            if air_times.shape[1] >= 2:
+                air_var = air_times.var(dim=1, correction=0)
 
-        return (w1 * vel_reward
-                - w2 * flat_orient
-                - w3 * height_error
-                - w4 * lin_vel_z
-                - w5 * yaw_rate
-                - w_ar * action_rate
-                - w_e * energy)
+        return (self.cfg.reward_w1    * vel_reward
+                - self.cfg.reward_w2  * flat_orient
+                - self.cfg.reward_w3  * height_error
+                - self.cfg.reward_w4  * lin_vel_z
+                - self.cfg.reward_w_action_rate * action_rate
+                - self.cfg.reward_w_energy      * energy
+                - self.cfg.reward_w_air_time    * air_var)
 
     def _reward_walk(self) -> torch.Tensor:
         return self._reward_simple()
@@ -693,7 +677,6 @@ def make_env_from_config(config_path: str, num_envs: int | None = None) -> Unitr
     # Gait
     env_cfg.gait_name = cfg_dict["gait"]["name"]
     env_cfg.phase_offsets = cfg_dict["gait"]["phase_offsets"]
-    env_cfg.leg_pair_map = cfg_dict["gait"].get("leg_pair_map", [0, 0, 1, 1])
 
     # CPG
     cpg = cfg_dict.get("cpg", {})
@@ -703,20 +686,15 @@ def make_env_from_config(config_path: str, num_envs: int | None = None) -> Unitr
 
     # Reward
     rwd = cfg_dict.get("reward", {})
-    env_cfg.reward_w1 = rwd.get("w1_distance", rwd.get("w1_velocity", 1.0))
-    env_cfg.reward_w2 = rwd.get("w2_instability", 0.5)
-    env_cfg.reward_w3 = rwd.get("w3_height_error", rwd.get("w3_collision", 0.2))
-    env_cfg.reward_w4 = rwd.get("w4_slippage", 0.3)
-    env_cfg.reward_w5 = rwd.get("w5_phase_error", rwd.get("w5_heading_error", 0.0))
-    env_cfg.reward_w_gait = rwd.get("w_gait", 2.0)
-    env_cfg.reward_w_energy = rwd.get("w_energy", 0.01)
-    env_cfg.reward_w_air_time = rwd.get("w_air_time", 0.5)
-    env_cfg.reward_w_lin_vel_z = rwd.get("w_lin_vel_z", 2.0)
-    env_cfg.reward_w_ang_vel_xy = rwd.get("w_ang_vel_xy", 0.05)
-    env_cfg.reward_w_action_rate = rwd.get("w_action_rate", 0.01)
-    env_cfg.reward_w_joint_pos = rwd.get("w_joint_pos", 0.1)
-    env_cfg.reward_height_nominal = rwd.get("height_nominal", 0.42)
-    env_cfg.reward_target_velocity = rwd.get("target_velocity", 0.4)
+    env_cfg.reward_w1 = float(rwd.get("w1_distance", rwd.get("w1_velocity", 1.0)))
+    env_cfg.reward_w2 = float(rwd.get("w2_instability", 0.5))
+    env_cfg.reward_w3 = float(rwd.get("w3_height_error", rwd.get("w3_collision", 0.2)))
+    env_cfg.reward_w4 = float(rwd.get("w4_slippage", 0.3))
+    env_cfg.reward_w_energy = float(rwd.get("w_energy", 0.01))
+    env_cfg.reward_w_air_time = float(rwd.get("w_air_time", 0.5))
+    env_cfg.reward_w_action_rate = float(rwd.get("w_action_rate", 0.01))
+    env_cfg.reward_height_nominal = float(rwd.get("height_nominal", 0.42))
+    env_cfg.reward_target_velocity = float(rwd.get("target_velocity", 0.4))
 
     # Episode
     env_cfg.episode_length_s = cfg_dict.get("env", {}).get("episode_length", 500) * env_cfg.sim.dt * env_cfg.decimation

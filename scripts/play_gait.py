@@ -21,7 +21,7 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Play a trained CPG gait")
 AppLauncher.add_app_launcher_args(parser)
 parser.add_argument("--gait", type=str, default="walk",
-                    choices=["walk", "trot", "pace", "bound", "steer"])
+                    choices=["walk", "walk_fixed", "trot", "pace", "bound", "steer"])
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--steps", type=int, default=1000,
                     help="Steps to run (1000 = 20s at 50Hz)")
@@ -42,19 +42,21 @@ from isaaclab.scene import InteractiveSceneCfg
 # ---------------------------------------------------------------------------
 
 PHASE_OFFSETS = {
-    "walk":  [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
-    "trot":  [0.0, math.pi, math.pi, 0.0],
-    "pace":  [0.0, math.pi, 0.0, math.pi],
-    "bound": [0.0, 0.0, math.pi, math.pi],
-    "steer": [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
+    "walk":       [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
+    "walk_fixed": [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
+    "trot":       [0.0, math.pi, math.pi, 0.0],
+    "pace":       [0.0, math.pi, 0.0, math.pi],
+    "bound":      [0.0, 0.0, math.pi, math.pi],
+    "steer":      [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
 }
 
 WEIGHTS_PATH = {
-    "walk":  "weights/W_walk.npy",
-    "trot":  "weights/W_trot.npy",
-    "pace":  "weights/W_pace.npy",
-    "bound": "weights/W_bound.npy",
-    "steer": "weights/W_steer.npy",
+    "walk":       "weights/W_walk.npy",
+    "walk_fixed": "weights/W_walk_fixed.npy",
+    "trot":       "weights/W_trot.npy",
+    "pace":       "weights/W_pace.npy",
+    "bound":      "weights/W_bound.npy",
+    "steer":      "weights/W_steer.npy",
 }
 
 # ---------------------------------------------------------------------------
@@ -69,12 +71,28 @@ if not weights_file.exists():
     sys.exit(1)
 
 cfg = UnitreeB1EnvCfg()
-cfg.gait_name = args.gait
+cfg.gait_name = "walk" if args.gait == "walk_fixed" else args.gait
 cfg.phase_offsets = PHASE_OFFSETS[args.gait]
 cfg.scene = InteractiveSceneCfg(num_envs=args.num_envs, env_spacing=2.5, replicate_physics=True)
 
 env = UnitreeB1Env(cfg)
 W = np.load(weights_file)
+
+# Normalize W to the (H, 3) indirect shape the env expects.
+#
+# Shapes found in weights/:
+#   (H, 3)   — indirect encoding (walk)        → use as-is
+#   (H, 12)  — direct/per-leg encoding (trot, bound)
+#              → average per-joint columns across the 4 legs to recover shared W
+#   (B, H, 3)— batch saved (pace, steer)       → take W[0]
+if W.ndim == 3:
+    W = W[0]                              # (B, H, 3) → (H, 3)
+if W.shape[1] == 12:
+    # (H, 12) direct: columns k*3:k*3+3 belong to leg k
+    # Average across legs to approximate shared indirect weights
+    W = W.reshape(W.shape[0], 4, 3).mean(axis=1)  # (H, 3)
+    print(f"  [info] Direct-encoding weights averaged to indirect (H, 3) for playback.")
+
 env.set_weights(W)
 
 print(f"\n  Gait    : {args.gait}")
@@ -102,6 +120,20 @@ phase_history = []      # CPG phi per step
 
 LEG_LABELS = ["FL", "FR", "RL", "RR"]
 
+# Resolve foot body IDs in guaranteed FL, FR, RL, RR order.
+# env._foot_ids has no ordering guarantee — explicitly match by name.
+_foot_ids_ordered = None
+if env._contact_sensor is not None:
+    all_ids, all_names = env._contact_sensor.find_bodies(".*_foot$")
+    desired = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+    ordered = [all_ids[all_names.index(n)] for n in desired if n in all_names]
+    if len(ordered) == 4:
+        _foot_ids_ordered = ordered
+        print(f"  Foot ID order: {list(zip(desired, ordered))}")
+    else:
+        _foot_ids_ordered = list(env._foot_ids.cpu().numpy())
+        print(f"  [warn] Could not resolve FL/FR/RL/RR order; using raw env._foot_ids")
+
 # Header
 print(f"  {'step':>6} | {'vx':>7} {'vz':>6} | {'h':>5} {'tilt':>6} | "
       f"{'gait':>4} {'match':>5} | {'r_vx':>5} {'r_gait':>6} {'r_ori':>6} {'r_ht':>6} {'r_vz':>6} | "
@@ -119,10 +151,9 @@ try:
         total_reward += reward
 
         # Record foot contact state for env 0 (every step)
-        if env._contact_sensor is not None and env._foot_ids is not None:
-            net_forces = env._contact_sensor.data.net_forces_w_history
-            foot_forces = torch.norm(net_forces[:, 0, :, :], dim=-1)
-            in_contact = (foot_forces[0, env._foot_ids] > 1.0).cpu().numpy()
+        if env._contact_sensor is not None and _foot_ids_ordered is not None:
+            contact_time = env._contact_sensor.data.current_contact_time[0, _foot_ids_ordered]
+            in_contact = (contact_time > 0.0).cpu().numpy()
             contact_history.append(in_contact)
             phase_history.append(env._phi % (2 * np.pi))
 
@@ -251,21 +282,32 @@ if contact_history:
     dt = 0.02  # control step seconds
     time_axis = np.arange(n_steps) * dt
 
-    # Duty factor per leg = fraction of time in stance
-    duty = contact_arr.mean(axis=0)
-    print(f"\n  Duty factor (fraction of time on ground):")
+    # Filter out micro-swings shorter than min_swing_s (noise from tiny CPG oscillations).
+    # A real leg lift takes ≥ 0.1 s; anything shorter is sensor/oscillation artifact.
+    min_swing_steps = max(1, int(0.10 / dt))  # 5 steps = 0.1 s
+    contact_filtered = contact_arr.copy()
+    for i in range(4):
+        col = contact_filtered[:, i].astype(int)
+        air_starts = np.where(np.diff(np.concatenate([[1], col, [1]])) == -1)[0]
+        air_ends   = np.where(np.diff(np.concatenate([[1], col, [1]])) ==  1)[0]
+        for s, e in zip(air_starts, air_ends):
+            if (e - s) < min_swing_steps:
+                contact_filtered[s:e, i] = True   # fill short gap back to stance
+
+    # Duty factor per leg = fraction of time in stance (after filtering)
+    duty = contact_filtered.mean(axis=0)
+    print(f"\n  Duty factor (fraction of time on ground, ≥0.1s swing threshold):")
     for i, lab in enumerate(LEG_LABELS):
         print(f"    {lab}: {duty[i]*100:.1f}%")
 
     # Detect first contact times for each leg (for phase offset analysis)
     print(f"\n  Footfall pattern (first few stance-start times, seconds):")
     for i, lab in enumerate(LEG_LABELS):
-        # Find rising edges (False → True)
-        col = contact_arr[:, i].astype(int)
+        col = contact_filtered[:, i].astype(int)
         edges = np.where(np.diff(col) == 1)[0] + 1
         times = edges * dt
         first_few = ", ".join(f"{t:.2f}" for t in times[:5])
-        print(f"    {lab}: {first_few}")
+        print(f"    {lab}: {first_few or '(always in contact)'}")
 
     # Try matplotlib plot
     try:
@@ -277,11 +319,9 @@ if contact_history:
         colors = ["#e63946", "#2a9d8f", "#e9c46a", "#457b9d"]
 
         for i, (lab, color) in enumerate(zip(LEG_LABELS, colors)):
-            # Draw horizontal bars where foot is in stance
-            stance = contact_arr[:, i]
+            # Draw horizontal bars where foot is in stance (filtered)
+            stance = contact_filtered[:, i]
             for start in np.where(np.diff(np.concatenate([[0], stance.astype(int), [0]])) == 1)[0]:
-                end = start + np.argmin(stance[start:] | ~stance[start:]) if start < n_steps else start
-                # Actually find where it turns False
                 tail = np.where(~stance[start:])[0]
                 end = start + (tail[0] if len(tail) else n_steps - start)
                 ax.barh(i, (end - start) * dt, left=start * dt,

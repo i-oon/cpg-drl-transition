@@ -1,0 +1,59 @@
+# Phase 1 – Walk: RETRAIN with all 5 bugs fixed.
+#
+# Key differences from phase1_walk.yaml:
+#   - action_scale=0.25 is now correctly applied in _apply_action
+#   - stiffness=400, spawn_z=0.50 (fixed in env module-level deepcopy)
+#   - cosine prior amplitudes ×4 to restore ±10°/±9° joint movement under scale
+#   - exploration_noise ×4 for equivalent joint-space perturbation
+#   - output saved to W_walk_fixed.npy (preserves old weights for comparison)
+#   - air-time variance penalty active (reward_w_air_time=0.5 via env default)
+
+cpg:
+  alpha: 1.01
+  freq_train: 1.0
+  dt: 0.02
+
+rbf:
+  num_neurons: 20
+  variance: 0.04
+
+gait:
+  name: walk
+  phase_offsets: [0.0, 3.14159, 1.5708, 4.7124]
+
+pibb:
+  init_mode: cosine
+  cosine_thigh_amp: 0.20        # was 0.05; ×4 to compensate action_scale=0.25
+  cosine_calf_amp:  0.16        # was 0.04; ×4 to compensate action_scale=0.25
+  exploration_noise: 0.18       # was 0.045; ×4 for equivalent joint-space exploration
+  noise_decay_rate: 0.998
+  temperature: 10.0
+  init_var_boost: 2.0
+  max_iterations: 2000
+  convergence_threshold: 0.001
+
+reward:
+  w1_distance: 2.0
+  w2_instability: 2.0
+  w3_height_error: 4.0
+  w4_slippage: 2.0
+  w_action_rate: 0.001
+  w_energy: 1e-7
+  w_air_time: 0.5
+  height_nominal: 0.42
+  target_velocity: 0.4
+
+env:
+  num_envs: 256
+  episode_length: 200
+  robot: unitree_b1
+  terrain: flat
+
+logging:
+  log_dir: logs/phase1_cpg_fixed
+  run_name: walk_fixed
+  save_interval: 100
+  log_interval: 10
+
+output:
+  weights_path: weights/W_walk_fixed.npy

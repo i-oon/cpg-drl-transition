@@ -85,18 +85,19 @@ class PIBBTrainer:
             angles = 2.0 * np.pi * np.arange(H) / H
             W = np.zeros((H, self.num_joints), dtype=np.float32)
             # hip:   zero (side-to-side lateral, let PIBB discover)
-            # thigh: cos(θ) × 0.05 → ±12° fore/aft swing
-            # calf:  sin(θ) × 0.04 → ±9° foot clearance, LAGS thigh by 90°
-            #        so calf is extended (foot planted) during stance
-            #        and flexed (foot lifted) during swing.
-            # (RBF overlap inflates raw ~4×; tuned amplitudes produce the
-            #  CLAUDE.md target of ±12°/±9° post-tanh on the KENNE trajectory.
-            #  Earlier version used cos(θ+π/2) = −sin(θ) — phase-inverted,
-            #  caused stepping-in-place with net-zero stride.)
-            W[:, 1] = 0.05 * np.cos(angles)
-            W[:, 2] = 0.04 * np.sin(angles)
+            # thigh: cos(θ) × amp_thigh — fore/aft swing
+            # calf:  sin(θ) × amp_calf  — foot clearance, lags thigh by 90°
+            # RBF overlap amplifies raw signal ~4×; with action_scale=0.25 the
+            # effective joint offset is: 0.25 × tanh(4 × amp).
+            # amp=0.20 → 0.25 × tanh(0.80) ≈ ±0.18 rad ≈ ±10° (target ±12°)
+            # amp=0.16 → 0.25 × tanh(0.64) ≈ ±0.15 rad ≈  ±9° (target  ±9°)
+            amp_thigh = pibb.get("cosine_thigh_amp", 0.20)
+            amp_calf  = pibb.get("cosine_calf_amp",  0.16)
+            W[:, 1] = amp_thigh * np.cos(angles)
+            W[:, 2] = amp_calf  * np.sin(angles)
             self.W = W
-            logger.info("W_init: cosine walking prior (thigh=0.20, calf=0.15)")
+            logger.info("W_init: cosine walking prior (thigh_amp=%.3f, calf_amp=%.3f)",
+                        amp_thigh, amp_calf)
         else:
             self.W = np.random.uniform(-0.1, 0.1,
                 (self.num_rbf, self.num_joints)).astype(np.float32)

@@ -173,10 +173,35 @@ Foot contact bars (blue = stance, white = swing). Each policy runs for 20 s.
 
 The original Phase 1 design used a **CPG-RBF (Central Pattern Generator + Radial Basis Function)** controller optimized with **PI^BB (Thor et al. 2021)**. After ~3 weeks of iteration (Week 10 + early Week 11) and 12 documented encoding experiments, this approach was abandoned in favor of pure PPO velocity tracking.
 
-The dealbreakers:
-- **B1 is too heavy for PIBB.** At 50 kg, every exploratory step risks a fall (large negative reward). PI^BB's softmax update barely moves W. Cold-init policies stay near origin for thousands of iterations.
-- **Direct encoding (240 params) breaks trot.** Only shared-W indirect encoding (60 params) produces stable diagonal coordination, but it remains vulnerable to morphological asymmetry exploits.
-- **PPO-on-W is catastrophic.** Putting policy output directly into a CPG W matrix at 50 Hz produces bang-bang motor saturation; the robot flips in 4 steps.
+#### Verified play results (post-training, fixed env)
+
+After training, five implementation bugs were identified and fixed in `envs/unitree_b1_env.py`: missing action scale (×0.25), wrong actuator stiffness (200 → 400), wrong spawn height (0.42 → 0.50 m), dead gait-coordination reward code (unreachable, contained undefined variable crash), and missing air-time variance penalty. These fixes make the environment physically correct but do not change the fundamental optimizer limitations.
+
+Two measurements were taken to separate implementation bugs from structural limitations:
+
+**Experiment A — old weights, fixed env:** Playback of `W_walk.npy` (best weights from the buggy training run) in the corrected environment.
+
+**Experiment B — full retrain in fixed env:** Fresh PIBB training (`configs/phase1_walk_fixed.yaml`, cosine prior with ×4 amplitudes, exploration noise ×4, 2000 iterations) in the corrected environment. Converged at iteration 1356. Weights saved to `W_walk_fixed.npy`.
+
+| Metric | A: old weights, fixed env | B: retrained in fixed env | PPO trot |
+|---|---:|---:|---:|
+| **mean vx** | **0.000 m/s** | **+0.091 m/s** | 0.434 m/s |
+| vx std | 0.004 | 0.171 | ~0.02 |
+| total reward (500 steps) | −80.93 | −19.00 | positive |
+| FL / FR / RL / RR duty | 28% / 100% / 100% / 100% | 85% / 77% / 47% / 50% | ~40/33/39/65 % |
+| locomotion | none — stands still | oscillatory lunge | stable trot |
+
+**Experiment A** confirms the bug impact: the old W was trained with joints moving 4× too far; in the correct environment (scale ×0.25) those weights produce movements too small to generate any locomotion. The −80.93 total reward is entirely from the height penalty (body at 0.498 m vs 0.42 m target, never walks away).
+
+**Experiment B** confirms the structural limitation: even after a complete retrain with all bugs fixed, the best CPG-RBF walk achieves only **+0.091 m/s** — a 4.8× gap vs PPO trot (+0.434 m/s). The vx std (0.171) exceeds the mean (0.091), revealing that the robot is oscillating — lurching forward then backward — rather than walking steadily. Duty factors are severely uneven (FL 85%, FR 77% vs RL 47%, RR 50%): front legs brace, rear legs push, the classic lunge-fall-recover signature. **The "0.088 m/s" figure cited during training was a training-run artifact — the post-fix measured result on held-out playback is 0.091 m/s (oscillatory lunge, not stable gait).**
+
+#### Why the bug fixes are not enough — three structural dealbreakers
+
+- **PIBB collapses on heavy robots (the math breaks down).** PIBB's softmax update weights are meaningful only when there is spread between R_min and R_max across the sample population. On B1 at 50 kg, almost every exploratory W perturbation causes a fall — all samples cluster near the same low reward. The softmax weights equalize (p_i → 1/N), and the update becomes a noise-weighted average of random perturbations, which is effectively zero. W stopped learning long before 2000 iterations. Lighter robots (Go2 at ~15 kg, Thor's hexapod) have more survivable exploration and genuine reward spread; B1 does not.
+
+- **Shared W cannot handle B1's morphological asymmetry.** Indirect encoding uses one W (20×3, 60 params) shared across all 4 legs — per-leg differences come only from integer phase offsets. B1 has a 0.2 rad asymmetry between front thighs (0.8 rad) and rear thighs (1.0 rad). The same thigh column in W that produces the right swing arc for FL produces the wrong arc for RL. There is no W that simultaneously satisfies both leg pairs — the representation is structurally incapable of encoding this robot's gait.
+
+- **The reward landscape has a local optimum PIBB cannot escape.** "Lunge forward and fall" consistently outscores early-stage cyclic gait in per-episode total reward. PIBB has no credit assignment — it evaluates W by episode total, so it always updates toward lunge-better rather than cycle-reliably. The global optimum (stable periodic gait across 500 steps) requires coordinated behavior PIBB's update rule cannot discover.
 
 The pivot shifted Phase 1 from "research-grade CPG-RBF tuning" to "engineering-grade PPO velocity tracking." Phase 2's research contribution is *unaffected* because the contribution is the **per-leg residual blending architecture**, not how the base policies are produced.
 
@@ -754,7 +779,10 @@ cpg-drl-transition/
 - PI^BB with softmax averaging, per-joint noise scaling
 - LocoNets KENNE pre-compute integration
 - Cosine walking prior (Thor-style)
-- **Conclusion:** B1 + PIBB cannot reliably produce stable gaits in the project timeline
+- Post-hoc: 5 implementation bugs identified and fixed (action scale, stiffness, spawn height, dead reward code, missing air-time variance)
+- Old weights in fixed env: **vx = 0.000 m/s** — robot stands still (weights trained 4× too large, now moves too small)
+- Full retrain in fixed env (`W_walk_fixed.npy`, converged at iter 1356): **vx = +0.091 m/s** (oscillatory lunge, std=0.171)
+- **Conclusion:** B1 + PIBB cannot produce stable locomotion due to three structural dealbreakers (optimizer collapse, representation bottleneck, reward local optimum) — the 4.8× gap vs PPO (+0.434 m/s) persists even with all bugs fixed
 
 ### Week 11 — Phase 1 PPO pivot ✅
 - Manager-based RL env with B1-specific actuator config

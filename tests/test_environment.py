@@ -84,7 +84,18 @@ def _build_isaaclab_mocks():
     sys.modules["isaaclab.sim"].DomeLightCfg = MagicMock()
 
     # Stub ArticulationCfg
+    class _ActuatorCfg:
+        stiffness = 200.0
+        damping = 5.0
+
+    class _InitStateCfg:
+        pos = (0.0, 0.0, 0.42)
+
     class ArticulationCfg:
+        def __init__(self):
+            self.actuators = {"base_legs": _ActuatorCfg()}
+            self.init_state = _InitStateCfg()
+
         def replace(self, **kwargs):
             return self
 
