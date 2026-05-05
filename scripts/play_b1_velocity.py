@@ -28,7 +28,14 @@ parser.add_argument("--task", type=str,
 parser.add_argument("--checkpoint", type=str, required=True)
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--steps", type=int, default=1000)
+parser.add_argument("--video", type=str, default=None,
+                    help="If set, record video to this directory.")
+parser.add_argument("--video_length", type=int, default=None,
+                    help="Number of steps to record. Default = --steps.")
 args = parser.parse_args()
+
+if args.video:
+    args.enable_cameras = True
 
 app_launcher = AppLauncher(args)
 sim_app = app_launcher.app
@@ -59,7 +66,22 @@ env_cfg = parse_env_cfg(
     num_envs=args.num_envs,
 )
 
-env = gym.make(args.task, cfg=env_cfg)
+env = gym.make(args.task, cfg=env_cfg, render_mode="rgb_array" if args.video else None)
+
+if args.video:
+    video_dir = Path(args.video)
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_length = args.video_length if args.video_length is not None else args.steps
+    env = gym.wrappers.RecordVideo(
+        env,
+        video_folder=str(video_dir),
+        step_trigger=lambda step: step == 0,
+        video_length=video_length,
+        disable_logger=True,
+        name_prefix="play",
+    )
+    print(f"  [video] recording {video_length} steps → {video_dir}/")
+
 env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
 # ---------------------------------------------------------------------------

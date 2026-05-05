@@ -236,6 +236,7 @@ alpha_hist = []               # (T, 12) actual per-joint α (with Δα)
 alpha_baseline_hist = []     # (T, 12) schedule-only α (without Δα)
 blended_hist = []             # (T, 12) final blended action sent to robot
 ramp_progress_hist = []      # (T,) ramp_progress scalar for env 0
+termination_hist = []        # (T,) bool — True if env0 terminated after this state
 
 robot = env.unwrapped._robot
 contact_sensor = env.unwrapped._contact_sensor
@@ -254,6 +255,11 @@ def _set_gait_pair(env, current_name, target_name):
 current_name = gait_seq[0]
 target_name = gait_seq[1] if len(gait_seq) > 1 else gait_seq[0]
 _set_gait_pair(env, current_name, target_name)
+# Initialise α clock consistently so segment 1 also has a 2 s source hold.
+# _reset_idx() at env init randomises _transition_start_s to [1.5, 3.5];
+# overwrite here so all three methods start from the same baseline.
+env.unwrapped.episode_length_buf[:] = 0
+env.unwrapped._transition_start_s[:] = 2.0
 
 for step in range(args.steps):
     # Switch gait pair every switch_interval_s
@@ -262,18 +268,27 @@ for step in range(args.steps):
         current_name = target_name
         target_name = gait_seq[(seq_idx + 1) % len(gait_seq)]
         _set_gait_pair(env, current_name, target_name)
-        # Reset env episode_length_buf so α_baseline ramps from 0 again
+        # Reset α clock and pin transition_start_s to a fixed 2 s so the
+        # source gait is always visible for 2 s before the ramp begins,
+        # regardless of what _reset_idx may have randomised it to.
         env.unwrapped.episode_length_buf[:] = 0
+        env.unwrapped._transition_start_s[:] = 2.0
         switch_step_marks.append(step)
 
-    # Discrete baseline: force α=1 immediately at/after each switch
-    if args.baseline == "discrete" and step in switch_step_marks:
-        _past_ramp = int(
-            (env.unwrapped.cfg.transition_start_max_s
-             + env.unwrapped.cfg.transition_duration_s + 0.5)
-            / control_dt
-        )
-        env.unwrapped.episode_length_buf[:] = _past_ramp
+    # Discrete baseline: hold source for 2 s per segment, then instant α jump.
+    # Controlled via _transition_start_s (not episode_length_buf) because
+    # _pre_physics_step runs BEFORE episode_length_buf is incremented (line 335
+    # vs 360 in direct_rl_env.py), so buf manipulation gets seen one step late.
+    # Setting _transition_start_s to ±1e6 forces ramp_progress << 0 (α=0) or
+    # >> 1 (α=1) regardless of episode_length_buf value.
+    if args.baseline == "discrete":
+        _transition_start_steps = int(2.0 / control_dt)   # 100 steps = 2.0 s
+        steps_since_switch = (step if len(switch_step_marks) == 0
+                              else step - switch_step_marks[-1])
+        if steps_since_switch >= _transition_start_steps:
+            env.unwrapped._transition_start_s[:] = -1e6  # ramp >> 1 → α=1
+        else:
+            env.unwrapped._transition_start_s[:] = 1e6   # ramp << 0 → α=0
 
     with torch.no_grad():
         actions = policy(obs)
@@ -304,7 +319,6 @@ for step in range(args.steps):
     alpha_hist.append(eu._last_alpha_per_joint[e0_idx].cpu().numpy())
     alpha_baseline_hist.append(eu._last_alpha_baseline_per_joint[e0_idx].cpu().numpy())
     blended_hist.append(eu._last_blended[e0_idx].cpu().numpy())
-    # ramp_progress for this env: used to mark ramp-start and ramp-end
     t_ep = eu.episode_length_buf[e0_idx].float().item() * control_dt
     ramp_prog = (t_ep - eu._transition_start_s[e0_idx].item()) / eu.cfg.transition_duration_s
     ramp_progress_hist.append(ramp_prog)
@@ -319,11 +333,30 @@ for step in range(args.steps):
     power_inst_hist.append(p_inst)
     x_pos_hist.append(x_w)
 
+    # Record whether env0 terminated this step (time-out or body fall)
+    termination_hist.append(dones[e0_idx].item())
+
+    # Re-assert scripted gait pair + segment-aligned α clock after any auto-reset.
+    # _reset_idx() re-randomizes _gait_current, _gait_target, _transition_start_s,
+    # and sets episode_length_buf=0, which would restart the source-hold timer
+    # from scratch mid-segment — making ramp timing inconsistent across methods.
+    # Restoring episode_length_buf=steps_since_switch keeps the α clock aligned
+    # with the switch boundary, so all methods are directly comparable.
+    if dones.any():
+        _steps_since_switch = (step - switch_step_marks[-1] if switch_step_marks
+                               else step)
+        env.unwrapped._gait_current[:] = gait_names.index(current_name)
+        env.unwrapped._gait_target[:] = gait_names.index(target_name)
+        env.unwrapped._transition_start_s[:] = 2.0
+        env.unwrapped.episode_length_buf[:] = _steps_since_switch
+
     if (step + 1) % 50 == 0:
         gait_str = f"{current_name[:5]}→{target_name[:5]}"
-        print(f"  {step+1:5d} | {gait_str:>14} | "
-              f"{vx:+6.3f} {vz:+6.3f} | {h:5.3f} {tilt:6.4f} | "
-              f"{delta[0]:+6.3f} {delta[1]:+6.3f} {delta[2]:+6.3f} {delta[3]:+6.3f}")
+        alpha_b = eu._last_alpha_baseline_per_joint[e0_idx, 0].item()
+        gc_env = eu._gait_current[e0_idx].item()
+        print(f"  {step+1:5d} | {gait_str:>14} | gc={gc_env} α={alpha_b:.3f} | "
+              f"{vx:+6.3f} {h:5.3f} {tilt:6.4f} | "
+              f"Δα={delta[0]:+.3f} {delta[1]:+.3f} {delta[2]:+.3f} {delta[3]:+.3f}")
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -362,13 +395,29 @@ for i in range(1, len(rp_a)):
     if rp_a[i - 1] < 1 <= rp_a[i]:
         ramp_end_times.append(i * control_dt)
 
+# Termination times — steps where env0 terminated (pre-reset state was logged)
+term_a = np.array(termination_hist)
+termination_times = np.where(term_a)[0] * control_dt
+
+# Print termination count
+n_terms = int(term_a.sum())
+print(f"  Terminations  : {n_terms}  (env 0 resets during playback)")
+
 # Cost of Transport over the run
 distance = max(x_a[-1] - x_a[0], 1e-6)              # m
 energy   = float(np.sum(p_a) * control_dt)          # J
 cot      = energy / (args.robot_mass_kg * 9.81 * distance)
 
-# Joint accel: RMS across all 12 joints, mean over time (lower = smoother)
+# Joint accel: RMS across all 12 joints, mean over time
 joint_acc_rms = float(np.sqrt(np.mean(ja_a ** 2)))
+
+# Joint JERK = d(joint_acc)/dt — the actual smoothness metric (rad/s³).
+# `jacc_RMS` measures acceleration magnitude, NOT smoothness — a constant-
+# high-acc trajectory has zero jerk yet large jacc². Use jerk for any
+# "smooth motion" claim.
+jerk_a = np.diff(ja_a, axis=0) / control_dt          # (T-1, 12)  rad/s³
+jerk_rms = float(np.sqrt(np.mean(jerk_a ** 2)))
+jerk_max = float(np.max(np.abs(jerk_a)))
 
 print(f"  Steps         : {args.steps}")
 print(f"  Total reward  : {total_reward.mean().item():.2f}")
@@ -379,7 +428,9 @@ print(f"  Tilt   : mean={tilt_a.mean():.4f}  max={tilt_a.max():.4f}")
 print(f"\n  Distance       : {distance:.2f} m  (over {args.steps * control_dt:.1f}s)")
 print(f"  Energy used    : {energy:.1f} J")
 print(f"  Cost of Transp : {cot:.3f}      (lower = better; biological quadrupeds ~0.2)")
-print(f"  Joint-acc RMS  : {joint_acc_rms:.2f} rad/s²  (lower = smoother transitions)")
+print(f"  Joint-acc RMS  : {joint_acc_rms:.2f} rad/s²  (acc magnitude, NOT smoothness)")
+print(f"  Joint-JERK RMS : {jerk_rms:8.0f} rad/s³  (smoothness — lower = motor-friendlier)")
+print(f"  Joint-JERK max : {jerk_max:8.0f} rad/s³  (worst-case spike)")
 print(f"\n  Per-leg Δα (residual correction) statistics:")
 print(f"    {'leg':<5} {'mean':>8} {'std':>8} {'|Δα|max':>9}")
 for i, lab in enumerate(["FL", "FR", "RL", "RR"]):
@@ -418,14 +469,15 @@ if args.save_plots:
         seg_labels.append(f"{gait_seq[seg_idx]}→{gait_seq[tgt_idx]}")
 
     def _draw_phase_lines(ax, label_segments=False):
-        """Vertical lines: red=pair-swap, green=ramp-start, orange=ramp-end.
-        label_segments=True adds gait-pair text at top of each segment."""
+        """Vertical lines: red=pair-swap, green=ramp-start, orange=ramp-end, purple=termination."""
         for s in switch_step_marks:
             ax.axvline(s * control_dt, ls="--", c="r",  alpha=0.7, lw=1.2, label="_nolegend_")
         for t in ramp_start_times:
             ax.axvline(t, ls="--", c="g",  alpha=0.8, lw=1.0, label="_nolegend_")
         for t in ramp_end_times:
             ax.axvline(t, ls="--", c="orange", alpha=0.8, lw=1.0, label="_nolegend_")
+        for t in termination_times:
+            ax.axvline(t, ls=":", c="purple", alpha=0.9, lw=1.5, label="_nolegend_")
         if label_segments:
             for j, label in enumerate(seg_labels):
                 mid = (seg_boundaries[j] + seg_boundaries[j + 1]) / 2
@@ -447,7 +499,7 @@ if args.save_plots:
     ax_gait.invert_yaxis()
     ax_gait.set_ylabel("foot")
     ax_gait.set_title(f"Gait diagram — {method_label}  "
-                      f"(red=pair-swap  green=ramp-start  orange=ramp-end)")
+                      f"(red=swap  green=ramp-start  orange=ramp-end  purple=termination)")
     ax_gait.grid(alpha=0.2)
     # Bottom panel: vx trace
     ax_vx = axes[1]
@@ -478,6 +530,66 @@ if args.save_plots:
     fig.savefig(out_dir / "joint_positions.png", dpi=120)
     plt.close(fig)
 
+    # 1b. Joint acceleration per leg — spikes visible at transition boundaries
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+    for ax, (leg, k) in zip(axes, leg_idx.items()):
+        ax.plot(t_axis, ja_a[:, k],      label=f"{leg}_hip",   lw=0.8, alpha=0.85)
+        ax.plot(t_axis, ja_a[:, 4 + k],  label=f"{leg}_thigh", lw=0.8, alpha=0.85)
+        ax.plot(t_axis, ja_a[:, 8 + k],  label=f"{leg}_calf",  lw=0.8, alpha=0.85)
+        ax.axhline(0, c="k", lw=0.5)
+        _draw_phase_lines(ax, label_segments=True)
+        ax.set_ylabel(f"{leg} [rad/s²]")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(alpha=0.3)
+    axes[-1].set_xlabel("time [s]")
+    fig.suptitle("Joint acceleration per leg  (spikes = transition shocks)  "
+                 "(red=swap  green=ramp-start  orange=ramp-end)")
+    fig.tight_layout()
+    fig.savefig(out_dir / "joint_acc.png", dpi=120)
+    plt.close(fig)
+
+    # 1c. Joint JERK per leg + jerk-vs-α overlay + RMS-over-time bottom panel.
+    # Jerk = d(joint_acc)/dt (rad/s³). This is the motor-relevant smoothness
+    # signal. The bottom panel shows a 50-step rolling RMS — peaks identify
+    # WHEN in the transition the smoothness fails.
+    t_jerk = t_axis[1:]                          # diff is one shorter than t_axis
+    win = 50                                     # 50 steps = 1.0 s rolling window
+    # Per-step total ||jerk||² across 12 joints, then sqrt(mean) over a window
+    jerk_l2_step = np.sqrt(np.mean(jerk_a ** 2, axis=1))   # (T-1,) instantaneous jerk RMS
+    jerk_rolling = np.array([
+        np.sqrt(np.mean(jerk_a[max(0, i - win):i + 1] ** 2))
+        for i in range(len(jerk_a))
+    ])
+
+    fig, axes = plt.subplots(5, 1, figsize=(14, 13), sharex=True,
+                             gridspec_kw={"height_ratios": [2, 2, 2, 2, 1.5]})
+    for ax, (leg, k) in zip(axes[:4], leg_idx.items()):
+        ax.plot(t_jerk, jerk_a[:, k],     label=f"{leg}_hip",   lw=0.7, alpha=0.85)
+        ax.plot(t_jerk, jerk_a[:, 4 + k], label=f"{leg}_thigh", lw=0.7, alpha=0.85)
+        ax.plot(t_jerk, jerk_a[:, 8 + k], label=f"{leg}_calf",  lw=0.7, alpha=0.85)
+        ax.axhline(0, c="k", lw=0.5)
+        _draw_phase_lines(ax, label_segments=True)
+        ax.set_ylabel(f"{leg} jerk\n[rad/s³]")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.grid(alpha=0.3)
+    # Bottom panel: rolling-window jerk RMS — single line, immediately
+    # interpretable. Spikes here are when smoothness fails worst.
+    ax_r = axes[4]
+    ax_r.plot(t_jerk, jerk_rolling, lw=1.2, c="C3", label=f"jerk RMS ({win}-step rolling)")
+    ax_r.axhline(jerk_rms, c="k", ls=":", lw=1.0, label=f"episode jerk_RMS = {jerk_rms:.0f}")
+    _draw_phase_lines(ax_r, label_segments=True)
+    ax_r.set_ylabel("jerk RMS\n[rad/s³]")
+    ax_r.set_xlabel("time [s]")
+    ax_r.legend(loc="upper right", fontsize=8)
+    ax_r.grid(alpha=0.3)
+    fig.suptitle(f"Joint JERK per leg — {method_label}  "
+                 f"(jerk_RMS={jerk_rms:.0f}, jerk_max={jerk_max:.0f} rad/s³)\n"
+                 f"red=swap  green=ramp-start  orange=ramp-end  "
+                 f"— peaks during ramp = MLP/blend smoothness failure")
+    fig.tight_layout()
+    fig.savefig(out_dir / "joint_jerk.png", dpi=120)
+    plt.close(fig)
+
     # 2. Δα(t) per leg + residual joint contribution
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
     for i, lab in enumerate(["FL", "FR", "RL", "RR"]):
@@ -503,24 +615,82 @@ if args.save_plots:
     fig.savefig(out_dir / "delta_alpha.png", dpi=120)
     plt.close(fig)
 
+    # 2a-extra. α_baseline over time — definitive proof of transition timing
+    # This is the single most important diagnostic: if the source hold is working,
+    # α_baseline must be 0 for the first 2s of each segment, then ramp/jump to 1.
+    fig, ax = plt.subplots(figsize=(14, 3))
+    ax.plot(t_axis, alb_a[:, 0], lw=1.5, c="C3", label="α_baseline (FL_hip)")
+    ax.axhline(0, c="k", lw=0.5, ls=":")
+    ax.axhline(1, c="k", lw=0.5, ls=":")
+    _draw_phase_lines(ax, label_segments=True)
+    ax.set_ylabel("α_baseline")
+    ax.set_xlabel("time [s]")
+    ax.set_ylim(-0.1, 1.1)
+    ax.set_title(f"α baseline schedule — {method_label}  "
+                 f"(must be 0 for 2s after red, then ramp/jump to 1)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_dir / "alpha_baseline.png", dpi=120)
+    plt.close(fig)
+
     # 2b. Source vs target vs blended joint commands
-    # Scale by action_scale so values are in radians (joint offset from default pose)
+    # Layout: for EACH joint type, one plot with:
+    #   Row 0: α_baseline(t) — unambiguous timing proof (must be 0 during source hold)
+    #   Row 1-4: per-leg joint offset.  Each leg panel has:
+    #     - background shading: light-blue = source-hold (α<0.05),
+    #                           light-orange = target-hold (α>0.95)
+    #     - blue: π_current action,  orange: π_target action,
+    #       green: blended action,   purple dashed: (π_current - π_target) × asc
+    #       (the purple line is the most honest indicator — zero means both
+    #        policies agree, non-zero means blending is doing real work)
     asc = env_cfg.action_scale   # 0.25
     jt_fullname = {"hip": "hip (abduction)", "thigh": "thigh (flexion)", "calf": "calf (knee)"}
+    alpha_base_1d = alb_a[:, 0]   # (T,) schedule-only α — same for all joints
     for j, jt in enumerate(["hip", "thigh", "calf"]):
-        fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
-        for k, (leg, ax) in enumerate(zip(["FL", "FR", "RL", "RR"], axes)):
+        fig, axes = plt.subplots(5, 1, figsize=(14, 14), sharex=True,
+                                 gridspec_kw={"height_ratios": [1, 2, 2, 2, 2]})
+        # Top panel: α_baseline over time
+        ax_a = axes[0]
+        ax_a.plot(t_axis, alpha_base_1d, lw=1.8, c="C3", label="α_baseline")
+        ax_a.fill_between(t_axis, 0, alpha_base_1d, alpha=0.15, color="C1")
+        ax_a.set_ylim(-0.05, 1.15)
+        ax_a.axhline(0, c="k", lw=0.5, ls=":")
+        ax_a.axhline(1, c="k", lw=0.5, ls=":")
+        _draw_phase_lines(ax_a, label_segments=True)
+        ax_a.set_ylabel("α_baseline\n(0=src, 1=tgt)")
+        ax_a.legend(loc="upper right", fontsize=7)
+        ax_a.grid(alpha=0.3)
+        # Per-leg panels
+        for k, (leg, ax) in enumerate(zip(["FL", "FR", "RL", "RR"], axes[1:])):
             jidx = k + j * 4
-            ax.plot(t_axis, ac_a[:, jidx] * asc, label="π_current", lw=0.8, alpha=0.7, c="C0")
-            ax.plot(t_axis, at_a[:, jidx] * asc, label="π_target",  lw=0.8, alpha=0.7, c="C1")
-            ax.plot(t_axis, bl_a[:, jidx] * asc, label="blended",   lw=1.2, c="C2")
-            _draw_phase_lines(ax, label_segments=True)
-            ax.set_ylabel(f"{leg}_{jt}\noffset [rad]")
-            ax.legend(loc="upper right", fontsize=7)
+            src  = ac_a[:, jidx] * asc
+            tgt  = at_a[:, jidx] * asc
+            bld  = bl_a[:, jidx] * asc
+            diff = (src - tgt)            # policy disagreement; zero → no difference
+
+            # Background shading: source-hold region blue, target-hold orange
+            src_mask = alpha_base_1d < 0.05
+            tgt_mask = alpha_base_1d > 0.95
+            ax.fill_between(t_axis, ax.get_ylim()[0] if hasattr(ax, '_ylim') else -1,
+                            ax.get_ylim()[1] if hasattr(ax, '_ylim') else 1,
+                            where=src_mask, alpha=0.08, color="C0", step="post")
+            ax.fill_between(t_axis, -1, 1, where=tgt_mask,
+                            alpha=0.08, color="C1", step="post")
+
+            ax.plot(t_axis, src,  label="π_src",  lw=0.8, alpha=0.7, c="C0")
+            ax.plot(t_axis, tgt,  label="π_tgt",  lw=0.8, alpha=0.7, c="C1")
+            ax.plot(t_axis, bld,  label="blended", lw=1.2, c="C2")
+            ax.plot(t_axis, diff, label="src−tgt", lw=0.7, ls="--", c="C5", alpha=0.8)
+            ax.axhline(0, c="k", lw=0.3)
+            _draw_phase_lines(ax, label_segments=(k == 0))
+            ax.set_ylabel(f"{leg}_{jt} [rad]")
+            ax.legend(loc="upper right", fontsize=6, ncol=2)
             ax.grid(alpha=0.3)
         axes[-1].set_xlabel("time [s]")
-        fig.suptitle(f"{jt_fullname[jt]} — joint offset from default pose [rad]  "
-                     f"(red=swap  green=ramp-start  orange=ramp-end)")
+        fig.suptitle(f"{jt_fullname[jt]} — joint offset [rad]  |  {method_label}\n"
+                     f"src−tgt≠0 → policies differ (blending does real work)  "
+                     f"blue-bg=src-hold  orange-bg=tgt-hold")
         fig.tight_layout()
         fig.savefig(out_dir / f"blend_{jt}.png", dpi=120)
         plt.close(fig)

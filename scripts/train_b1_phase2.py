@@ -28,6 +28,12 @@ parser.add_argument("--max_iterations", type=int, default=None,
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--resume", type=str, default=None)
 parser.add_argument("--run_name", type=str, default=None)
+parser.add_argument("--warmstart", type=str, default=None,
+                    help="Path to a checkpoint trained with a smaller obs dim. "
+                         "The first linear layer of actor and critic is extended "
+                         "by appending zero-initialised columns for new obs dims. "
+                         "Noise std is reset to the configured init_noise_std. "
+                         "Use this to warm-start v11 (46-D obs) from v10 (45-D obs).")
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -40,7 +46,7 @@ import torch
 
 import isaaclab_tasks  # noqa: F401
 import envs.b1_phase2_env  # noqa: F401  -- registers gym ID
-from envs.b1_velocity_ppo_cfg import Phase2PPORunnerCfg
+from envs.b1_velocity_ppo_cfg import Phase2PPORunnerCfg, Phase2V11PPORunnerCfg
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from rsl_rl.runners import OnPolicyRunner
@@ -48,11 +54,65 @@ from rsl_rl.runners import OnPolicyRunner
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+
+# ---------------------------------------------------------------------------
+# Warm-start helper
+# ---------------------------------------------------------------------------
+
+def _load_warmstart(runner: OnPolicyRunner, path: str,
+                    old_obs_dim: int, new_obs_dim: int,
+                    init_noise_std: float) -> None:
+    """Load a checkpoint trained with old_obs_dim and adapt it to new_obs_dim.
+
+    The first linear layer of actor and critic is extended: weights for the
+    original dims are preserved; weights for new dims are zero-initialised
+    (so the policy initially ignores the new features and learns them from
+    scratch on top of the already-competent base policy).
+
+    Noise std is reset to init_noise_std rather than inheriting the
+    checkpoint's converged (potentially very small) value.
+
+    The optimizer is NOT loaded — training restarts with a fresh Adam state,
+    which avoids momentum from the old training trajectory interfering with
+    the new curriculum.
+    """
+    loaded = torch.load(path, map_location=runner.device, weights_only=False)
+    state = loaded["model_state_dict"]
+
+    if old_obs_dim != new_obs_dim:
+        for key in ("actor.0.weight", "critic.0.weight"):
+            if key not in state:
+                print(f"  Warning: key '{key}' not found in checkpoint — skipping dim adapt")
+                continue
+            old_w = state[key]                                  # (hidden_dim, old_obs_dim)
+            new_w = torch.zeros(old_w.shape[0], new_obs_dim,
+                                dtype=old_w.dtype, device=old_w.device)
+            new_w[:, :old_obs_dim] = old_w
+            state[key] = new_w
+
+    # Reset noise std — handle both 'std' (linear) and 'log_std' (log-space) conventions
+    for std_key in ("std", "log_std"):
+        if std_key in state:
+            if std_key == "log_std":
+                import math
+                state[std_key] = torch.full_like(state[std_key], math.log(init_noise_std))
+            else:
+                state[std_key] = torch.full_like(state[std_key], init_noise_std)
+            break
+
+    runner.alg.actor_critic.load_state_dict(state)
+    print(f"  Warm-started from : {path}")
+    print(f"  Obs dim adapted   : {old_obs_dim} → {new_obs_dim}")
+    print(f"  Noise std reset to: {init_noise_std}")
+
+
 # ---------------------------------------------------------------------------
 # Configs
 # ---------------------------------------------------------------------------
 
-agent_cfg = Phase2PPORunnerCfg()
+# Select PPO config based on task so v11's hyperparameters (entropy=0, tight
+# noise, longer budget) are used automatically without needing a separate script.
+agent_cfg = Phase2V11PPORunnerCfg() if "V11" in args.task else Phase2PPORunnerCfg()
 agent_cfg.seed = args.seed
 if args.max_iterations is not None:
     agent_cfg.max_iterations = args.max_iterations
@@ -111,6 +171,15 @@ runner = OnPolicyRunner(
 if args.resume is not None:
     print(f"  Resuming from : {args.resume}")
     runner.load(args.resume)
+
+if args.warmstart is not None:
+    _load_warmstart(
+        runner,
+        path=args.warmstart,
+        old_obs_dim=45,
+        new_obs_dim=env_cfg.observation_space,
+        init_noise_std=agent_cfg.policy.init_noise_std,
+    )
 
 runner.learn(
     num_learning_iterations=agent_cfg.max_iterations,

@@ -3,7 +3,8 @@ Phase 2 environment — DirectRLEnv with frozen base policies + per-leg blending
 
 Step flow:
     1. Receive 4-D action (per-leg Δα residual) from Phase 2 policy.
-    2. Compute Δα_clamped = tanh(action) × delta_alpha_max  (∈ [-0.2, +0.2]).
+    2. v10: Compute Δα = sigmoid(action) × delta_alpha_max  (∈ [0, 0.3]).
+       Asymmetric so α_per_joint can only ride at or above smoothstep.
     3. Compute α_baseline from elapsed time in episode.
     4. Build base-policy observations (matching the 48-D Phase 1 obs format).
     5. Query π_current(obs), π_target(obs) → 12-D joint offset actions.
@@ -30,6 +31,7 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2EnvCfg,
     B1Phase2Residual1DEnvCfg,
     B1Phase2E2ERateEnvCfg,
+    B1Phase2V11EnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import B1FlatPPORunnerCfg
 
@@ -70,6 +72,12 @@ class B1Phase2Env(DirectRLEnv):
         # Per-env transition start time, sampled at reset for robustness
         self._transition_start_s = torch.full(
             (self.num_envs,), float(cfg.transition_start_min_s), device=self.device,
+        )
+
+        # Per-env transition duration — fixed at min_s when min==max (v10 behaviour),
+        # or sampled uniformly from [min_s, max_s] each reset (v11 curriculum).
+        self._transition_duration_env = torch.full(
+            (self.num_envs,), float(cfg.transition_duration_min_s), device=self.device,
         )
 
         # CRITICAL: per-policy last_action buffer.
@@ -122,7 +130,7 @@ class B1Phase2Env(DirectRLEnv):
         """Called once per control step (before decimated physics steps).
         Build base-policy obs, query both policies, blend per leg, apply."""
         t = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
-        ramp_progress = (t - self._transition_start_s) / self.cfg.transition_duration_s
+        ramp_progress = (t - self._transition_start_s) / self._transition_duration_env
 
         control_dt = self.cfg.sim.dt * self.cfg.decimation
 
@@ -138,28 +146,39 @@ class B1Phase2Env(DirectRLEnv):
             # rate ∈ [0, 1/transition_duration_s] so at max rate α reaches 1 in
             # exactly transition_duration_s seconds — same horizon as the residual.
             # Structurally prevents instant α=1 collapse (α must accumulate step by step).
-            rate = torch.sigmoid(actions[:, 0]) / self.cfg.transition_duration_s
+            rate = torch.sigmoid(actions[:, 0]) / self._transition_duration_env
             self._alpha_integrated = (self._alpha_integrated + rate * control_dt).clamp(0.0, 1.0)
             alpha_baseline = self._alpha_integrated
             delta_alpha = torch.zeros(self.num_envs, 4, device=self.device)
             self._last_residual = delta_alpha.detach()
         else:
-            # --- Δα residual (clamped via tanh × delta_alpha_max) ---
+            # --- Δα residual ---
+            # v10: Δα is squashed via sigmoid (NOT tanh) so Δα ∈ [0, delta_alpha_max].
+            # Combined with the reduced cap (delta_alpha_max=0.3 in v10), this
+            # gives Δα ∈ [0, 0.3]: the MLP can ADVANCE α above smoothstep but
+            # cannot DELAY it below smoothstep.
+            #
+            # Why: v9 diagnosis showed the MLP exploiting the symmetric tanh
+            # band [−0.8, +0.8] to delay the first half of the ramp (Δα < 0)
+            # and rush the second half. The asymmetric sigmoid removes this
+            # exploit by construction — α_per_joint ≥ α_baseline always.
+            #
+            # Earlier versions used tanh(action) × 0.8 = Δα ∈ [−0.8, +0.8].
             # Supports both 4-D per-leg (action_space=4) and 1-D scalar broadcast
-            # (action_space=1, Residual-1D ablation). The 1-D case applies the
-            # same Δα to all four legs for a direct comparison with Residual-4D.
+            # (Residual-1D ablation). The 1-D case applies the same Δα to all
+            # four legs for a direct comparison with Residual-4D.
             if actions.shape[1] == 1:
-                delta_alpha = torch.tanh(actions[:, 0:1]) * self.cfg.delta_alpha_max
+                delta_alpha = torch.sigmoid(actions[:, 0:1]) * self.cfg.delta_alpha_max
                 delta_alpha = delta_alpha.expand(self.num_envs, 4)   # (E, 4) broadcast
             else:
-                delta_alpha = torch.tanh(actions) * self.cfg.delta_alpha_max  # (E, 4)
+                delta_alpha = torch.sigmoid(actions) * self.cfg.delta_alpha_max  # (E, 4) ∈ [0, max]
 
             # --- Hard time-gate the residual ---
             # Δα is forced to zero OUTSIDE the transition window. This guarantees
             # the source gait runs untouched during the hold phase (α_baseline=0)
             # and the target gait runs untouched after the ramp (α_baseline=1).
             # The MLP can only intervene during the ramp itself.
-            pad = self.cfg.residual_window_padding_s / self.cfg.transition_duration_s
+            pad = self.cfg.residual_window_padding_s / self._transition_duration_env
             in_window = ((ramp_progress > -pad) & (ramp_progress < 1.0 + pad)).float()
             delta_alpha = delta_alpha * in_window.unsqueeze(1)  # (E, 4) — zeroed outside window
             self._last_residual = delta_alpha.detach()
@@ -232,7 +251,7 @@ class B1Phase2Env(DirectRLEnv):
 
         # α_baseline + cycles_elapsed scalars (must match _apply_action's schedule)
         t = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
-        ramp_progress = (t - self._transition_start_s) / self.cfg.transition_duration_s
+        ramp_progress = (t - self._transition_start_s) / self._transition_duration_env
         x = ramp_progress.clamp(0.0, 1.0)
         if self.cfg.alpha_schedule == "e2e":
             # No hand-designed baseline visible to E2E MLP — it must infer timing
@@ -243,13 +262,20 @@ class B1Phase2Env(DirectRLEnv):
             alpha_baseline = x.unsqueeze(1)
         cycles_elapsed = (t / 1.0).unsqueeze(1)                   # 1 Hz CPG-equivalent
 
-        obs = torch.cat([
+        obs_parts = [
             base_lin_vel, base_ang_vel, projected_gravity,         # 9
             joint_pos_rel, joint_vel,                               # 24
             last_action,                                            # 4
             gait_current_oh, gait_target_oh,                        # 8
             alpha_baseline, cycles_elapsed,                         # 2
-        ], dim=1)
+        ]
+        if self.cfg.observation_space == 46:
+            # v11: append normalised transition duration so the MLP can
+            # condition on ramp speed. Normalised by 5.0 (max of curriculum
+            # range) so the value stays in [0.3, 1.0] during training.
+            norm_duration = (self._transition_duration_env / 5.0).unsqueeze(1)  # (E, 1)
+            obs_parts.append(norm_duration)
+        obs = torch.cat(obs_parts, dim=1)
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -266,7 +292,7 @@ class B1Phase2Env(DirectRLEnv):
         # gets stronger gradient to spend Δα on tilt suppression DURING the
         # transition window, where the gait kinematics fight body stability.
         t_now = self.episode_length_buf.float() * (self.cfg.sim.dt * self.cfg.decimation)
-        ramp_progress_r = (t_now - self._transition_start_s) / self.cfg.transition_duration_s
+        ramp_progress_r = (t_now - self._transition_start_s) / self._transition_duration_env
         in_window_r = ((ramp_progress_r > 0.0) & (ramp_progress_r < 1.0)).float()
         orient_weight = cfg.rew_orientation * (1.0 + cfg.transition_orientation_boost * in_window_r)
         orient = torch.sum(d.projected_gravity_b[:, :2] ** 2, dim=1) * orient_weight
@@ -279,9 +305,21 @@ class B1Phase2Env(DirectRLEnv):
                                                                  self._last_residual)) ** 2, dim=1) * cfg.rew_action_rate
         self._prev_residual = self._last_residual
 
-        # Joint-acceleration L2 (v5 polish: suppress joint-target jerk → smooth
-        # transitions, lower tilt spikes at switch instants)
+        # Joint-acceleration L2 — penalizes acc magnitude (defensive against
+        # PD overshoot). Kept from v7 but is NOT a smoothness metric on its
+        # own (a constant high-acc trajectory has zero jerk yet large jacc²).
         joint_acc = torch.sum(d.joint_acc ** 2, dim=1) * cfg.rew_joint_acc
+
+        # v8: Joint JERK L2 — penalizes the rate of change of joint acceleration.
+        # Jerk (rad/s³) is the motor-relevant smoothness signal: high jerk =
+        # rapid acc reversals = mechanical stress on housing/gears. Computed
+        # via finite difference; first step uses jerk=0 by initialising prev
+        # to the current value the first time round.
+        control_dt = self.cfg.sim.dt * self.cfg.decimation
+        prev_jacc = getattr(self, "_prev_joint_acc", d.joint_acc)
+        jerk = (d.joint_acc - prev_jacc) / control_dt          # (E, 12) rad/s³
+        joint_jerk = torch.sum(jerk ** 2, dim=1) * cfg.rew_joint_jerk
+        self._prev_joint_acc = d.joint_acc.detach()
 
         # Alive bonus
         alive = torch.full_like(track_lin, cfg.rew_alive)
@@ -293,7 +331,8 @@ class B1Phase2Env(DirectRLEnv):
         # tracking/orientation rewards it enables.
         sparsity = torch.sum(self._last_residual ** 2, dim=1) * cfg.rew_residual_sparsity
 
-        return track_lin + track_ang + orient + height_err + action_rate + joint_acc + alive + sparsity
+        return (track_lin + track_ang + orient + height_err + action_rate
+                + joint_acc + joint_jerk + alive + sparsity)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (terminated, truncated)."""
@@ -343,6 +382,13 @@ class B1Phase2Env(DirectRLEnv):
         self._last_residual[env_ids] = 0.0
         self._alpha_integrated[env_ids] = 0.0
 
+        # Reset prev_joint_acc so v8's jerk penalty doesn't spike across resets
+        # (joint_acc is non-zero post-reset; first-step jerk would otherwise be
+        # huge).  Using a fresh zero baseline + the current-fallback in
+        # _get_rewards lets jerk = 0 on the first post-reset step.
+        if hasattr(self, "_prev_joint_acc"):
+            self._prev_joint_acc[env_ids] = 0.0
+
         # Reset per-policy last-action history for these envs.
         # New episode → no prior policy output → start fresh at zero.
         # (Subsequent steps will populate this with each policy's actual output.)
@@ -356,6 +402,17 @@ class B1Phase2Env(DirectRLEnv):
             self.cfg.transition_start_min_s
             + rng * (self.cfg.transition_start_max_s - self.cfg.transition_start_min_s)
         )
+
+        # Sample per-env transition duration.
+        # Fixed when min == max (v10 behaviour); uniform curriculum when min < max (v11).
+        dur_range = self.cfg.transition_duration_max_s - self.cfg.transition_duration_min_s
+        if dur_range > 0.0:
+            rng_dur = torch.rand(n, device=self.device)
+            self._transition_duration_env[env_ids] = (
+                self.cfg.transition_duration_min_s + rng_dur * dur_range
+            )
+        else:
+            self._transition_duration_env[env_ids] = self.cfg.transition_duration_min_s
 
     # ------------------------------------------------------------------
     # Helpers
@@ -455,5 +512,15 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2E2ERateEnvCfg",
         "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2E2ERatePPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V11-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V11EnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V11PPORunnerCfg",
     },
 )

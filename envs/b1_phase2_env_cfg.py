@@ -133,7 +133,11 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # at episode reset — gives policy robustness to different starting moments
     transition_start_min_s: float = 1.5      # min current-gait stance hold
     transition_start_max_s: float = 3.5      # max current-gait stance hold
-    transition_duration_s: float = 3.0       # α_baseline ramp duration (deterministic)
+    # α_baseline ramp duration. When min == max (default), every episode uses
+    # the same fixed duration. Set min < max to sample uniformly each episode
+    # (curriculum training — see B1Phase2V11EnvCfg).
+    transition_duration_min_s: float = 3.0
+    transition_duration_max_s: float = 3.0
     # v7: α_baseline schedule — "linear" (constant dα/dt) or "smoothstep"
     # (Hermite 3x²−2x³, derivative=0 at both endpoints → smoother kinematic
     # blend, especially near α=1 where the linear ramp produced tilt spikes).
@@ -141,11 +145,15 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # B1Phase2E2EEnvCfg for the E2E PPO baseline comparison).
     alpha_schedule: str = "smoothstep"       # "linear" | "smoothstep" | "e2e"
 
-    # Δα bounding via tanh.
-    # v1 (max=0.2): too tight, MLP saturated and stood still.
-    # v2 (max=0.8): wider, working transitions for trot/bound/pace pairs.
-    # v3 (current): keep 0.8 — works well when gated to transition window.
-    delta_alpha_max: float = 0.8
+    # Δα bounding.
+    # v1 (tanh, max=0.2): too tight, MLP saturated and stood still.
+    # v2 (tanh, max=0.8): wider, working transitions but allowed delay-rush exploit.
+    # v3-v9 (tanh, max=0.8): kept 0.8 with various reward tweaks.
+    # v10 (sigmoid, max=0.3): asymmetric clamp — Δα ∈ [0, 0.3] only.
+    #   Sigmoid removes negative-Δα capability (no more delay below smoothstep).
+    #   max=0.3 prevents E2E-style aggressive ramp compression.
+    #   Net constraint: α_baseline ≤ α_per_joint ≤ α_baseline + 0.3.
+    delta_alpha_max: float = 0.3
 
     # Time-gating of residual — Δα is FORCED to zero outside the transition
     # window so the source/target gaits run untouched during steady-state
@@ -176,11 +184,22 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # v5 polish: tightened from -0.05 → -0.15 to suppress Δα jitter at switch
     # instants (was the source of v4's tilt spikes).
     rew_action_rate: float = -0.15           # per-leg Δα step-to-step smoothness
-    # v5 polish: joint-acceleration L2 — directly penalizes joint-target jerk
-    # → smoother transitions, lower tilt spikes. Matches Phase 1 stock
-    # dof_acc_l2 magnitude (-1.25e-7) doubled to actually shape Phase 2's
-    # policy (which only has the 4-D residual to act on).
+    # v5 polish: joint-acceleration L2 — penalizes acceleration MAGNITUDE
+    # (despite the old comment claiming it targets jerk, it does not — a
+    # constant-high-acc trajectory has zero jerk yet large jacc²). Kept
+    # as a defensive PD-overshoot penalty.
     rew_joint_acc: float = -2.5e-7
+    # v8: Joint JERK L2 — the actual smoothness metric (rad/s³).
+    # jerk = (q̈_t − q̈_{t-1}) / control_dt; penalises rapid acceleration
+    # reversals which are what stress motor housings/gears.
+    #
+    # Tuning history:
+    #   v8 (-5e-10): too strong → MLP found "compressed-jump" strategy
+    #     (Δα→±0.4 to spike α to ≈1 at window start, minimising mid-α time)
+    #     Result: jerk 10291, vx 0.398 (lost all v7 tracking benefit)
+    #   v9 (-1e-10): 5× lighter pressure — keeps v7's per-leg coordination
+    #     corrections, pays a token jerk cost.  Aim: vx ≈ 0.42, jerk ≈ 9500.
+    rew_joint_jerk: float = -1.0e-10
     rew_alive: float = 0.5                   # bonus per step alive
     # |Δα|² penalty — bumped -0.5 → -3.0 to keep the residual near zero
     # even WITHIN the transition window unless it's actively earning its
@@ -227,6 +246,28 @@ class B1Phase2Residual1DEnvCfg(B1Phase2EnvCfg):
 
     action_space: int = 1
     # alpha_schedule, delta_alpha_max, time-gating all inherited from B1Phase2EnvCfg
+
+
+@configclass
+class B1Phase2V11EnvCfg(B1Phase2EnvCfg):
+    """v11 — curriculum training over transition durations.
+
+    Samples transition_duration uniformly from [1.5, 5.0] s at each episode
+    reset. The normalized duration (duration / 5.0) is appended to the
+    observation so the MLP can condition on ramp speed explicitly.
+
+    Architecture is otherwise identical to v10 (smoothstep baseline,
+    sigmoid × 0.3 asymmetric clamp, same reward weights). Training on a
+    range of durations tests whether the per-leg residual gain at d=3 s
+    generalises beyond the training distribution.
+    """
+
+    # Curriculum range — uniform sample each episode reset
+    transition_duration_min_s: float = 1.5
+    transition_duration_max_s: float = 5.0
+
+    # +1 obs dim: normalised transition duration appended to the 45-D base obs
+    observation_space: int = 46
 
 
 @configclass

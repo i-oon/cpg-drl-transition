@@ -374,11 +374,158 @@ Uses `DCMotorCfg` (DC motor model) with:
 
 ---
 
-## References
+## Working with B1 — Lessons Learned
 
-- Unitree ROS: https://github.com/unitreerobotics/unitree_ros
-- Isaac Lab Docs: https://isaac-sim.github.io/IsaacLab/
-- URDF Converter: `~/IsaacLab/scripts/tools/convert_urdf.py`
+The setup above gives you a B1 that loads. It does not give you a B1 that trains well. This section documents the **B1-specific** gotchas discovered across Phase 1 (CPG-RBF + PPO) and Phase 2 (residual transition learning) — the kind of thing that takes weeks to find by trial and error.
+
+### B1 is heavy: Go2's reward weights are wrong by orders of magnitude
+
+Stock Isaac Lab locomotion configs are calibrated for the ~15 kg Go2. B1 is ~50 kg with a 23.7 N·m motor budget per joint (vs Go2's ~23 N·m on a much smaller body). The reward and domain-randomization weights that work on Go2 either saturate or fail to act on B1:
+
+| Term | Stock (Go2) | B1 override | Why |
+|---|---|---|---|
+| `dof_torques_l2` | −2e-4 | **−1e-6** (~200× smaller) | B1 effort 280 → torque² is ~150× larger; stock value saturates motors |
+| `add_base_mass` distribution | (−5, +5) kg | **(−10, +10) kg** | Proportional to 50 kg body |
+| `reset_base.velocity_range` (z, roll, pitch) | ±0.5 | **0** | A 50 kg body at 0.5 m/s vertical velocity face-plants in ~100 ms |
+| `reset_robot_joints.position_range` | (0.5, 1.5) | **(1.0, 1.0)** | ±50 % joint randomisation triggers immediate falls |
+| `base_contact.threshold` | 1 N | **50 N** | Settling produces 20–40 N transients on a 50 kg body |
+| `env_spacing` | 2.5 m | **3.5 m** | B1 footprint is 1.7× Go2's |
+| `gpu_max_rigid_patch_count` | 10·2¹⁵ | **20·2¹⁵** | Larger bodies → more contact patches |
+
+**Takeaway:** when porting any Go2/Anymal cfg to B1, don't assume defaults. Audit every weight that involves mass, force, or velocity scales.
+
+### Asset/cfg name overrides — silent failures if you miss them
+
+B1's USD keeps the URDF original names that Go2's renamed:
+
+```python
+# Trunk body name is "trunk" (NOT "base" like Go2).
+# Stock LocomotionVelocityRoughEnvCfg uses body_names="base" everywhere.
+self.terminations.base_contact.params["sensor_cfg"].body_names = "trunk"
+self.events.add_base_mass.params["asset_cfg"].body_names = "trunk"
+self.events.base_external_force_torque.params["asset_cfg"].body_names = "trunk"
+
+# Foot link names are *_foot (NOT *_calf). Contact-sensor regex:
+foot_pattern = ".*_foot$"   # matches FL_foot, FR_foot, RL_foot, RR_foot
+```
+
+**Symptom of forgetting these:** `ValueError: Cfg requires 1 body but 0 matched` at env build time.
+
+### Stock `UNITREE_B1_CFG` needs three overrides for actual locomotion
+
+The defaults from Step 5 above (stiffness=25.0, damping=0.5, init_z=0.42) **load** correctly but produce a robot that can't walk:
+
+| Field | Stock | Required | Symptom of leaving stock |
+|---|---:|---:|---|
+| `actuators["base_legs"].stiffness` | 25.0 | **400.0** | Body sags 9 cm under self-weight at default joints |
+| `actuators["base_legs"].damping` | 0.5 | **10.0** | Joint oscillation (proportional to stiffness — keep ratio ~25:1 → 40:1) |
+| `init_state.pos[2]` | 0.42 | **0.50** | Feet are 7.7 cm under the ground at default joint angles → spawn-time termination |
+
+**Critical:** never mutate the shared `UNITREE_B1_CFG` directly. Other code (legacy envs, other tasks) imports the same object. Always **deep-copy first**, then mutate the copy:
+
+```python
+import copy
+UNITREE_B1_CFG = copy.deepcopy(_UNITREE_B1_CFG_FROM_ASSETS)
+UNITREE_B1_CFG.actuators["base_legs"].stiffness = 400.0
+UNITREE_B1_CFG.actuators["base_legs"].damping = 10.0
+UNITREE_B1_CFG.init_state.pos = (0.0, 0.0, 0.50)
+```
+
+### Morphology — front/rear thigh asymmetry is permanent
+
+B1's URDF default joint angles encode a **+0.2 rad asymmetry** between front and rear thighs:
+
+```python
+# From the Step-5 init_state.joint_pos:
+"F[L,R]_thigh_joint": 0.8,     # front legs
+"R[L,R]_thigh_joint": 1.0,     # rear legs (+0.2 rad more flexed)
+".*L_hip_joint":  0.1,         # left mirror
+".*R_hip_joint": -0.1,         # right mirror
+".*_calf_joint": -1.5,
+```
+
+This isn't a bug — it's how Unitree shipped B1 — but it propagates everywhere:
+
+- **Rear-heavy duty factors** in every trained gait (rear legs work harder than front)
+- **Asymmetric leg roles** emerge in trained policies even with bilateral-symmetry rewards
+- **Shared-W CPG-RBF encodings cannot represent both leg pairs simultaneously** — there is no single 20×3 weight matrix that satisfies both 0.8 rad and 1.0 rad thigh defaults
+- **Phase-2 residual MLPs apply consistently larger corrections to rear legs** (`|Δα_RL|, |Δα_RR| > |Δα_FL|, |Δα_FR|`) — the rear-bias is data, not noise
+
+**Implication for design:** any architecture that assumes per-leg symmetry has a built-in error on B1. Either accept it, model per-leg explicitly, or compensate with hip-deviation/symmetry rewards (and even then, expect residual asymmetry).
+
+### Per-gait stability rewards must be relaxed — one size doesn't fit
+
+Bound has natural fore-aft pitch (body bobs during leap). Pace has natural lateral roll (body sways side-to-side). Stock orientation/velocity penalties **fight** these motions, and the policy compensates by **squatting low** to minimise body motion — breaking the gait. Required per-gait overrides:
+
+```python
+# Bound and pace base configs:
+flat_orientation_l2 weight: -2.5 → -0.5    # was suppressing pitch/roll → squat
+lin_vel_z_l2 weight:        -2.0 → -0.5    # was suppressing fore-aft heave → squat
+ang_vel_xy_l2 weight:       -0.05 → -0.02  # was suppressing roll/pitch rate
+
+# Compensate the relaxed stability with tighter height penalty:
+base_height_l2 weight:      -50  → -150    # prevent the squat trade-off
+
+# Pace and steer specifically:
+joint_lr_symmetry_penalty weight: → 0      # disabled (lateral or asymmetric coordination is inherent)
+```
+
+### PPO failure-mode catalog on B1
+
+These are the local optima PPO finds on B1's reward landscape, in order of how often they occur. Each got a custom MDP term in `envs/b1_velocity_mdp.py`:
+
+| Failure mode | Cause | Fix |
+|---|---|---|
+| **Trot attractor** | Trot is PPO's universal attractor on quadrupeds — bound/pace/walk all need explicit *anti-trot* rewards | Signed XOR-style coordination terms (`true_bound_reward`, `true_pace_reward`) — pure trot pays a penalty |
+| **Standstill exploit** | `track_lin_vel_xy_exp(std=0.5)` pays 88 % reward at vx=0 | Tighten std=0.25 + bump weight 1.0 → 1.5 |
+| **Crawl exploit (body sags 0.18 m)** | No height penalty in stock | `base_height_l2(target=0.42)` weight −50 (or −150 for bound/pace) |
+| **2-leg trot** (one diagonal pair planted forever) | No per-foot time bound | `excessive_air_time(max=0.5)` + `excessive_contact_time(max=0.5)` together |
+| **Tap-tap-tap** (5 Hz tap on planted foot to reset timer) | Cumulative time penalties don't catch frequency | `short_swing_penalty(min_swing_time=0.3 s)` |
+| **3+1 asymmetric** (FL cycles half-rate of others) | Per-foot bounds ok individually | `air_time_variance_penalty` (variance of last_air_time across 4 feet) |
+| **Bilateral L/R asymmetry** (FR hip 2× FL) | No L/R constraint (when expected) | `joint_lr_symmetry_penalty` — but **disable** for pace and steer |
+| **Walk never converges** | Low-velocity 3-stance pattern + B1 morphology | After 6 versions: not fixable with reward shaping. Drop walk from gait portfolio |
+
+### Black-box / population-based optimisation is structurally infeasible on B1
+
+PI^BB and similar optimisers collapse on B1 because **most exploratory perturbations cause falls**. All samples cluster near the reward floor (terminated, height-penalty dominated), softmax weights equalise (`p_i → 1/N`), and the update becomes a noise-weighted average of random perturbations — effectively zero. Even after fixing all 5 implementation bugs and full retraining (2000 iters, 60 params shared-W indirect encoding):
+
+| Method | Best vx | vx std | Coordination |
+|---|---:|---:|---|
+| PIBB CPG-RBF (retrained, all bugs fixed) | +0.091 m/s | 0.171 (oscillates) | Lunge-fall-recover |
+| PPO velocity tracking (trot) | **+0.434 m/s** | ~0.02 | Stable diagonal trot |
+
+**A 4.8× structural gap that does not close with implementation polish.** Lighter platforms (Go2 ~15 kg, Thor's hexapod ~5 kg) survive PIBB exploration; B1 does not. **Recommendation: on a 50 kg quadruped, use gradient-based RL (PPO/SAC), not population-based or black-box optimisation.**
+
+### Measurement gotchas that produced wrong conclusions
+
+These are the ways your evaluation script can lie to you:
+
+- **Foot contact**: in playback, use `current_contact_time > 0`, **not** single-frame `net_forces > threshold`. Single-frame snapshots miss brief 1–2 step contacts in fast gaits (bound/pace at 2.5 Hz). Symptom: gait diagrams show wrong duty factors.
+- **Foot apex during swing comes from calf flexion, not body height.** Bumping `lin_vel_z_l2` to "stop bouncing" makes the body **squat** instead of reducing foot lift. To raise foot clearance, tune calf joints / RBF amplitudes.
+- **`jacc_RMS` is not a smoothness metric.** A constant-high-acceleration trajectory has zero jerk yet large `jacc²`. The motor-relevant smoothness signal is **jerk** = `(q̈_t − q̈_{t-1}) / dt` (rad/s³). Use this for any "smooth motion" claim.
+- **Phase-2 specifically**: each frozen base policy must be queried with its **own** previous output as `last_action`. Passing zeros causes all base policies to collapse to default pose (cost us ~3 days in v3).
+
+### Compute envelope (RTX 4070 Ti SUPER, 16.7 GB VRAM)
+
+| Workload | Settings | Wall time |
+|---|---|---|
+| Phase 1 PPO trot training | 4096 envs, 1500 iters | ~30 min |
+| Phase 1 PPO bound (harder reward stack) | 4096 envs, 4000 iters | ~80 min |
+| Phase 2 residual MLP training | 2048 envs, 2000 iters | ~60 min |
+| Phase 2 playback (2000 steps, plots) | 4 envs | ~3 min |
+
+Adding `gpu_max_rigid_patch_count = 20·2¹⁵` to the sim config is required when going past ~2000 envs — B1's larger contact surfaces overflow Go2's default patch budget.
+
+### Architectural ceilings (the things tuning won't fix)
+
+Two findings that look like polish targets but are actually physical limits:
+
+- **Tilt floor at trot↔bound transitions**: across all Phase 2 polish iterations (v5/v6/v7), `tilt_max` converged to **0.19 ± 0.003** regardless of reward tweaks. At the trot→bound midpoint, the 50 kg body **must** pitch to absorb the momentum shift from diagonal to fore-aft contact. Don't waste training time pushing tilt below 0.19 with a bounded residual.
+- **Smoothness ceiling on residual blending**: frozen base policies with different gait phases produce intrinsically jerky blends — mid-α blending sums two out-of-phase oscillations. Per-leg α corrections cannot eliminate this; they can only shorten the time spent in the jerky middle (E2E PPO's strategy) or accept the jerk (v7's strategy). To break the ceiling, the architecture would need phase-aware base policies or a learned per-pair α curve, not a residual on a fixed smoothstep.
+
+---
+
+## References
 
 ---
 
