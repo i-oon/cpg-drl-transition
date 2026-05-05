@@ -9,7 +9,7 @@ IsaacLab-LocoNets/
 *.code-workspace
 .DS_Store
 Thumbs.db
-CLAUDE.md
+
 
 *.egg-info/
 dist/
@@ -19,6 +19,4 @@ build/
 *.log
 *.tmp
 
-logs/phase1
-logs/phase2
-logs/ppo_b1
+
