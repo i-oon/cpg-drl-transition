@@ -120,50 +120,6 @@ class Phase2E2EPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class Phase2V11PPORunnerCfg(Phase2PPORunnerCfg):
-    """v11 curriculum — duration range [1.5, 5.0] s, obs_space=46.
-
-    Four changes from v11_v2 (which diverged via noise-std spiral):
-      1. entropy_coef 0.001 → 0.0: eliminates the spiral cause entirely.
-         Without an explicit entropy bonus, log_std converges to whatever
-         value minimises the actor loss rather than drifting upward.
-      2. init_noise_std 0.1 → 0.05: matches the warm-start initialisation
-         (policy already knows d=3 s transitions, needs little exploration).
-      3. desired_kl 0.01 → 0.005: conservative adaptive LR — smaller
-         policy steps early in curriculum prevent value-function blow-up.
-      4. max_iterations 2000 → 3000: longer budget for generalisation.
-    Intended to be used with --warmstart logs/phase2/phase2_v10/model_final.pt
-    in train_b1_phase2.py — starting from v10 weights means the critic
-    already knows how to estimate returns near d=3 s and only needs to
-    extrapolate across the curriculum range.
-    """
-    experiment_name = "b1_phase2_v11"
-    max_iterations = 3000
-
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.05,
-        actor_hidden_dims=[128, 128],
-        critic_hidden_dims=[128, 128],
-        activation="elu",
-    )
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.0,
-        num_learning_epochs=5,
-        num_mini_batches=4,
-        learning_rate=5.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.005,
-        max_grad_norm=1.0,
-    )
-
-
-@configclass
 class Phase2Residual1DPPORunnerCfg(Phase2PPORunnerCfg):
     """Ablation: scalar residual (1-D Δα broadcast to all legs).
 

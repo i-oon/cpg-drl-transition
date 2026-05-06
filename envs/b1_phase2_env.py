@@ -31,7 +31,6 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2EnvCfg,
     B1Phase2Residual1DEnvCfg,
     B1Phase2E2ERateEnvCfg,
-    B1Phase2V11EnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import B1FlatPPORunnerCfg
 
@@ -515,12 +514,3 @@ gym.register(
     },
 )
 
-gym.register(
-    id="Isaac-B1-Phase2-V11-v0",
-    entry_point="envs.b1_phase2_env:B1Phase2Env",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V11EnvCfg",
-        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V11PPORunnerCfg",
-    },
-)

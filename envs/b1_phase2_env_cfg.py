@@ -249,28 +249,6 @@ class B1Phase2Residual1DEnvCfg(B1Phase2EnvCfg):
 
 
 @configclass
-class B1Phase2V11EnvCfg(B1Phase2EnvCfg):
-    """v11 — curriculum training over transition durations.
-
-    Samples transition_duration uniformly from [1.5, 5.0] s at each episode
-    reset. The normalized duration (duration / 5.0) is appended to the
-    observation so the MLP can condition on ramp speed explicitly.
-
-    Architecture is otherwise identical to v10 (smoothstep baseline,
-    sigmoid × 0.3 asymmetric clamp, same reward weights). Training on a
-    range of durations tests whether the per-leg residual gain at d=3 s
-    generalises beyond the training distribution.
-    """
-
-    # Curriculum range — uniform sample each episode reset
-    transition_duration_min_s: float = 1.5
-    transition_duration_max_s: float = 5.0
-
-    # +1 obs dim: normalised transition duration appended to the 45-D base obs
-    observation_space: int = 46
-
-
-@configclass
 class B1Phase2E2ERateEnvCfg(B1Phase2EnvCfg):
     """E2E rate-based α — MLP outputs dα/dt, α integrated monotonically from 0.
 

@@ -219,7 +219,7 @@ print(f"  {'step':>5} | {'gait':>14} | {'vx':>6} {'vz':>6} | {'h':>5} {'tilt':>6
 print("  " + "-" * 100)
 
 # History (env 0)
-vx_hist, h_hist, tilt_hist = [], [], []
+vx_hist, h_hist, tilt_hist, vz_hist = [], [], [], []
 delta_hist = []
 gait_hist = []
 joint_pos_hist = []          # (T, 12)
@@ -320,10 +320,10 @@ for step in range(args.steps):
     alpha_baseline_hist.append(eu._last_alpha_baseline_per_joint[e0_idx].cpu().numpy())
     blended_hist.append(eu._last_blended[e0_idx].cpu().numpy())
     t_ep = eu.episode_length_buf[e0_idx].float().item() * control_dt
-    ramp_prog = (t_ep - eu._transition_start_s[e0_idx].item()) / eu.cfg.transition_duration_s
+    ramp_prog = (t_ep - eu._transition_start_s[e0_idx].item()) / eu._transition_duration_env[e0_idx].item()
     ramp_progress_hist.append(ramp_prog)
 
-    vx_hist.append(vx); h_hist.append(h); tilt_hist.append(tilt)
+    vx_hist.append(vx); h_hist.append(h); tilt_hist.append(tilt); vz_hist.append(vz)
     delta_hist.append(delta)
     gait_hist.append((current_name, target_name))
     joint_pos_hist.append(jp)
@@ -368,6 +368,7 @@ print(f"  PLAYBACK SUMMARY — Phase 2 transition learning")
 print(sep)
 
 vx_a = np.array(vx_hist); h_a = np.array(h_hist); tilt_a = np.array(tilt_hist)
+vz_a = np.array(vz_hist)
 delta_a = np.array(delta_hist)
 jp_a = np.array(joint_pos_hist)         # (T, 12)
 jv_a = np.array(joint_vel_hist)
@@ -381,6 +382,7 @@ al_a  = np.array(alpha_hist)            # (T, 12) actual α per joint
 alb_a = np.array(alpha_baseline_hist)   # (T, 12) schedule-only α
 bl_a  = np.array(blended_hist)          # (T, 12) final blended action
 rp_a  = np.array(ramp_progress_hist)    # (T,) ramp_progress for env 0
+alpha_base_1d = alb_a[:, 0]            # (T,) scalar — same value across all 12 joints
 # Residual joint contribution: how much Δα shifts each joint target
 # = (α_actual − α_baseline) × (π_target − π_current), scaled by action_scale
 residual_joint_a = (al_a - alb_a) * (at_a - ac_a)  # (T, 12), in action units
@@ -394,6 +396,13 @@ for i in range(1, len(rp_a)):
         ramp_start_times.append(i * control_dt)
     if rp_a[i - 1] < 1 <= rp_a[i]:
         ramp_end_times.append(i * control_dt)
+
+# Body acceleration (forward + vertical) — used for body_acc plot
+body_acc_x    = np.diff(vx_a) / control_dt   # (T-1,) m/s²
+body_acc_z    = np.diff(vz_a) / control_dt   # (T-1,) m/s²
+body_acc_norm = np.sqrt(body_acc_x**2 + body_acc_z**2)
+body_acc_rms  = float(np.sqrt(np.mean(body_acc_norm**2)))
+body_acc_max  = float(body_acc_norm.max())
 
 # Termination times — steps where env0 terminated (pre-reset state was logged)
 term_a = np.array(termination_hist)
@@ -428,9 +437,11 @@ print(f"  Tilt   : mean={tilt_a.mean():.4f}  max={tilt_a.max():.4f}")
 print(f"\n  Distance       : {distance:.2f} m  (over {args.steps * control_dt:.1f}s)")
 print(f"  Energy used    : {energy:.1f} J")
 print(f"  Cost of Transp : {cot:.3f}      (lower = better; biological quadrupeds ~0.2)")
-print(f"  Joint-acc RMS  : {joint_acc_rms:.2f} rad/s²  (acc magnitude, NOT smoothness)")
-print(f"  Joint-JERK RMS : {jerk_rms:8.0f} rad/s³  (smoothness — lower = motor-friendlier)")
-print(f"  Joint-JERK max : {jerk_max:8.0f} rad/s³  (worst-case spike)")
+print(f"  Joint-acc RMS  : {joint_acc_rms:.2f} rad/s²")
+print(f"  Joint-JERK RMS : {jerk_rms:8.0f} rad/s³")
+print(f"  Joint-JERK max : {jerk_max:8.0f} rad/s³")
+print(f"  Body-acc RMS   : {body_acc_rms:.3f} m/s²  (forward+vertical combined)")
+print(f"  Body-acc max   : {body_acc_max:.3f} m/s²")
 print(f"\n  Per-leg Δα (residual correction) statistics:")
 print(f"    {'leg':<5} {'mean':>8} {'std':>8} {'|Δα|max':>9}")
 for i, lab in enumerate(["FL", "FR", "RL", "RR"]):
@@ -468,16 +479,28 @@ if args.save_plots:
         tgt_idx = (seg_idx + 1) % len(gait_seq)
         seg_labels.append(f"{gait_seq[seg_idx]}→{gait_seq[tgt_idx]}")
 
-    def _draw_phase_lines(ax, label_segments=False):
-        """Vertical lines: red=pair-swap, green=ramp-start, orange=ramp-end, purple=termination."""
+    def _draw_phase_bands(ax, label_segments=False):
+        """3-zone background shading + switch/termination lines.
+
+        Blue   = source-gait hold  (α_base < 0.05)
+        Purple = transition window  (0.05 ≤ α_base ≤ 0.95)
+        Orange = target-gait hold  (α_base > 0.95)
+        Red dashed = gait-pair swap | Magenta dotted = episode termination
+        """
+        xform = ax.get_xaxis_transform()   # x in data coords, y in axes (0-1) coords
+        src_mask = alpha_base_1d < 0.05
+        trs_mask = (alpha_base_1d >= 0.05) & (alpha_base_1d <= 0.95)
+        tgt_mask = alpha_base_1d > 0.95
+        ax.fill_between(t_axis, 0, 1, where=src_mask, alpha=0.10, color="#4472C4",
+                        step="post", transform=xform, zorder=0)
+        ax.fill_between(t_axis, 0, 1, where=trs_mask, alpha=0.12, color="#7B2D8B",
+                        step="post", transform=xform, zorder=0)
+        ax.fill_between(t_axis, 0, 1, where=tgt_mask, alpha=0.10, color="#ED7D31",
+                        step="post", transform=xform, zorder=0)
         for s in switch_step_marks:
-            ax.axvline(s * control_dt, ls="--", c="r",  alpha=0.7, lw=1.2, label="_nolegend_")
-        for t in ramp_start_times:
-            ax.axvline(t, ls="--", c="g",  alpha=0.8, lw=1.0, label="_nolegend_")
-        for t in ramp_end_times:
-            ax.axvline(t, ls="--", c="orange", alpha=0.8, lw=1.0, label="_nolegend_")
+            ax.axvline(s * control_dt, ls="--", c="r", alpha=0.7, lw=1.2)
         for t in termination_times:
-            ax.axvline(t, ls=":", c="purple", alpha=0.9, lw=1.5, label="_nolegend_")
+            ax.axvline(t, ls=":", c="magenta", alpha=0.9, lw=1.5)
         if label_segments:
             for j, label in enumerate(seg_labels):
                 mid = (seg_boundaries[j] + seg_boundaries[j + 1]) / 2
@@ -493,19 +516,19 @@ if args.save_plots:
         stance = contact_a[:, i]
         ax_gait.fill_between(t_axis, i + 0.1, i + 0.9, where=stance,
                              color="C0", alpha=0.85, step="post")
-    _draw_phase_lines(ax_gait, label_segments=True)
+    _draw_phase_bands(ax_gait, label_segments=True)
     ax_gait.set_yticks([0.5, 1.5, 2.5, 3.5])
     ax_gait.set_yticklabels(["FL", "FR", "RL", "RR"])
     ax_gait.invert_yaxis()
     ax_gait.set_ylabel("foot")
     ax_gait.set_title(f"Gait diagram — {method_label}  "
-                      f"(red=swap  green=ramp-start  orange=ramp-end  purple=termination)")
+                      f"(blue=src-hold  purple=transition  orange=tgt-hold  red=swap)")
     ax_gait.grid(alpha=0.2)
     # Bottom panel: vx trace
     ax_vx = axes[1]
     ax_vx.plot(t_axis, vx_a, lw=0.8, c="C1")
     ax_vx.axhline(env_cfg.velocity_cmd_x, ls=":", c="g", lw=1.0, label="cmd vx")
-    _draw_phase_lines(ax_vx, label_segments=True)
+    _draw_phase_bands(ax_vx, label_segments=True)
     ax_vx.set_ylabel("vx [m/s]")
     ax_vx.set_xlabel("time [s]")
     ax_vx.legend(loc="upper right", fontsize=8)
@@ -520,12 +543,12 @@ if args.save_plots:
         ax.plot(t_axis, jp_a[:, k],      label=f"{leg}_hip",   lw=1.0)
         ax.plot(t_axis, jp_a[:, 4 + k],  label=f"{leg}_thigh", lw=1.0)
         ax.plot(t_axis, jp_a[:, 8 + k],  label=f"{leg}_calf",  lw=1.0)
-        _draw_phase_lines(ax, label_segments=True)
+        _draw_phase_bands(ax, label_segments=True)
         ax.set_ylabel(f"{leg} [rad]")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(alpha=0.3)
     axes[-1].set_xlabel("time [s]")
-    fig.suptitle("Joint positions per leg  (red=swap  green=ramp-start  orange=ramp-end)")
+    fig.suptitle("Joint positions per leg  (blue=src-hold  purple=transition  orange=tgt-hold)")
     fig.tight_layout()
     fig.savefig(out_dir / "joint_positions.png", dpi=120)
     plt.close(fig)
@@ -537,66 +560,63 @@ if args.save_plots:
         ax.plot(t_axis, ja_a[:, 4 + k],  label=f"{leg}_thigh", lw=0.8, alpha=0.85)
         ax.plot(t_axis, ja_a[:, 8 + k],  label=f"{leg}_calf",  lw=0.8, alpha=0.85)
         ax.axhline(0, c="k", lw=0.5)
-        _draw_phase_lines(ax, label_segments=True)
+        _draw_phase_bands(ax, label_segments=True)
         ax.set_ylabel(f"{leg} [rad/s²]")
         ax.legend(loc="upper right", fontsize=8)
         ax.grid(alpha=0.3)
     axes[-1].set_xlabel("time [s]")
     fig.suptitle("Joint acceleration per leg  (spikes = transition shocks)  "
-                 "(red=swap  green=ramp-start  orange=ramp-end)")
+                 "(blue=src-hold  purple=transition  orange=tgt-hold)")
     fig.tight_layout()
     fig.savefig(out_dir / "joint_acc.png", dpi=120)
     plt.close(fig)
 
-    # 1c. Joint JERK per leg + jerk-vs-α overlay + RMS-over-time bottom panel.
-    # Jerk = d(joint_acc)/dt (rad/s³). This is the motor-relevant smoothness
-    # signal. The bottom panel shows a 50-step rolling RMS — peaks identify
-    # WHEN in the transition the smoothness fails.
-    t_jerk = t_axis[1:]                          # diff is one shorter than t_axis
-    win = 50                                     # 50 steps = 1.0 s rolling window
-    # Per-step total ||jerk||² across 12 joints, then sqrt(mean) over a window
-    jerk_l2_step = np.sqrt(np.mean(jerk_a ** 2, axis=1))   # (T-1,) instantaneous jerk RMS
-    jerk_rolling = np.array([
-        np.sqrt(np.mean(jerk_a[max(0, i - win):i + 1] ** 2))
-        for i in range(len(jerk_a))
-    ])
+    # 1c. Body acceleration — forward (ax) and vertical (az) components.
+    # More interpretable than joint jerk: shows the "jolt" the trunk experiences.
+    # body_acc_x = dvx/dt, body_acc_z = dvz/dt, both in m/s².
+    # Spikes during the purple transition zone = blend-induced trunk disturbance.
+    t_bacc = t_axis[1:]   # np.diff is one element shorter
+    fig, axes = plt.subplots(3, 1, figsize=(14, 8), sharex=True,
+                             gridspec_kw={"height_ratios": [2, 2, 1.5]})
+    axes[0].plot(t_bacc, body_acc_x, lw=0.9, c="C0", label="ax = dvx/dt")
+    axes[0].axhline(0, c="k", lw=0.4)
+    _draw_phase_bands(axes[0], label_segments=True)
+    axes[0].set_ylabel("body ax\n[m/s²]")
+    axes[0].legend(loc="upper right", fontsize=8)
+    axes[0].grid(alpha=0.3)
 
-    fig, axes = plt.subplots(5, 1, figsize=(14, 13), sharex=True,
-                             gridspec_kw={"height_ratios": [2, 2, 2, 2, 1.5]})
-    for ax, (leg, k) in zip(axes[:4], leg_idx.items()):
-        ax.plot(t_jerk, jerk_a[:, k],     label=f"{leg}_hip",   lw=0.7, alpha=0.85)
-        ax.plot(t_jerk, jerk_a[:, 4 + k], label=f"{leg}_thigh", lw=0.7, alpha=0.85)
-        ax.plot(t_jerk, jerk_a[:, 8 + k], label=f"{leg}_calf",  lw=0.7, alpha=0.85)
-        ax.axhline(0, c="k", lw=0.5)
-        _draw_phase_lines(ax, label_segments=True)
-        ax.set_ylabel(f"{leg} jerk\n[rad/s³]")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.grid(alpha=0.3)
-    # Bottom panel: rolling-window jerk RMS — single line, immediately
-    # interpretable. Spikes here are when smoothness fails worst.
-    ax_r = axes[4]
-    ax_r.plot(t_jerk, jerk_rolling, lw=1.2, c="C3", label=f"jerk RMS ({win}-step rolling)")
-    ax_r.axhline(jerk_rms, c="k", ls=":", lw=1.0, label=f"episode jerk_RMS = {jerk_rms:.0f}")
-    _draw_phase_lines(ax_r, label_segments=True)
-    ax_r.set_ylabel("jerk RMS\n[rad/s³]")
-    ax_r.set_xlabel("time [s]")
-    ax_r.legend(loc="upper right", fontsize=8)
-    ax_r.grid(alpha=0.3)
-    fig.suptitle(f"Joint JERK per leg — {method_label}  "
-                 f"(jerk_RMS={jerk_rms:.0f}, jerk_max={jerk_max:.0f} rad/s³)\n"
-                 f"red=swap  green=ramp-start  orange=ramp-end  "
-                 f"— peaks during ramp = MLP/blend smoothness failure")
+    axes[1].plot(t_bacc, body_acc_z, lw=0.9, c="C2", label="az = dvz/dt")
+    axes[1].axhline(0, c="k", lw=0.4)
+    _draw_phase_bands(axes[1])
+    axes[1].set_ylabel("body az\n[m/s²]")
+    axes[1].legend(loc="upper right", fontsize=8)
+    axes[1].grid(alpha=0.3)
+
+    # Bottom: combined norm with episode RMS reference line
+    axes[2].plot(t_bacc, body_acc_norm, lw=0.9, c="C3", label="‖a‖ = √(ax²+az²)")
+    axes[2].axhline(body_acc_rms, c="k", ls=":", lw=1.0,
+                    label=f"episode RMS = {body_acc_rms:.3f}")
+    _draw_phase_bands(axes[2])
+    axes[2].set_ylabel("‖body acc‖\n[m/s²]")
+    axes[2].set_xlabel("time [s]")
+    axes[2].legend(loc="upper right", fontsize=8)
+    axes[2].grid(alpha=0.3)
+
+    fig.suptitle(f"Body acceleration — {method_label}  "
+                 f"(RMS={body_acc_rms:.3f} m/s²,  max={body_acc_max:.3f} m/s²)\n"
+                 f"blue=src-hold  purple=transition  orange=tgt-hold  "
+                 f"— spikes in purple = blend-induced trunk jolt")
     fig.tight_layout()
-    fig.savefig(out_dir / "joint_jerk.png", dpi=120)
+    fig.savefig(out_dir / "body_acc.png", dpi=120)
     plt.close(fig)
 
     # 2. Δα(t) per leg + residual joint contribution
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
     for i, lab in enumerate(["FL", "FR", "RL", "RR"]):
         axes[0].plot(t_axis, delta_a[:, i], label=f"Δα_{lab}", lw=1.0)
-    _draw_phase_lines(axes[0], label_segments=True)
+    _draw_phase_bands(axes[0], label_segments=True)
     axes[0].set_ylabel("Δα (per leg)"); axes[0].axhline(0, c="k", lw=0.5)
-    axes[0].set_title("Residual correction  (red=swap  green=ramp-start  orange=ramp-end)")
+    axes[0].set_title("Residual correction  (blue=src-hold  purple=transition  orange=tgt-hold)")
     axes[0].legend(loc="upper right", fontsize=8); axes[0].grid(alpha=0.3)
     colors = ["C0", "C1", "C2", "C3"]
     joint_types = ["hip", "thigh", "calf"]
@@ -606,7 +626,7 @@ if args.save_plots:
             ls = ["-", "--", ":"][j]
             axes[1].plot(t_axis, residual_joint_scaled_a[:, jidx],
                          color=col, ls=ls, lw=0.9, label=f"{leg}_{jt}" if k == 0 else None)
-    _draw_phase_lines(axes[1], label_segments=True)
+    _draw_phase_bands(axes[1], label_segments=True)
     axes[1].axhline(0, c="k", lw=0.5)
     axes[1].set_ylabel("Δjoint [rad]  (residual only)")
     axes[1].set_xlabel("time [s]"); axes[1].grid(alpha=0.3)
@@ -622,12 +642,12 @@ if args.save_plots:
     ax.plot(t_axis, alb_a[:, 0], lw=1.5, c="C3", label="α_baseline (FL_hip)")
     ax.axhline(0, c="k", lw=0.5, ls=":")
     ax.axhline(1, c="k", lw=0.5, ls=":")
-    _draw_phase_lines(ax, label_segments=True)
+    _draw_phase_bands(ax, label_segments=True)
     ax.set_ylabel("α_baseline")
     ax.set_xlabel("time [s]")
     ax.set_ylim(-0.1, 1.1)
     ax.set_title(f"α baseline schedule — {method_label}  "
-                 f"(must be 0 for 2s after red, then ramp/jump to 1)")
+                 f"(blue=src-hold  purple=transition  orange=tgt-hold)")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -646,7 +666,6 @@ if args.save_plots:
     #        policies agree, non-zero means blending is doing real work)
     asc = env_cfg.action_scale   # 0.25
     jt_fullname = {"hip": "hip (abduction)", "thigh": "thigh (flexion)", "calf": "calf (knee)"}
-    alpha_base_1d = alb_a[:, 0]   # (T,) schedule-only α — same for all joints
     for j, jt in enumerate(["hip", "thigh", "calf"]):
         fig, axes = plt.subplots(5, 1, figsize=(14, 14), sharex=True,
                                  gridspec_kw={"height_ratios": [1, 2, 2, 2, 2]})
@@ -657,7 +676,7 @@ if args.save_plots:
         ax_a.set_ylim(-0.05, 1.15)
         ax_a.axhline(0, c="k", lw=0.5, ls=":")
         ax_a.axhline(1, c="k", lw=0.5, ls=":")
-        _draw_phase_lines(ax_a, label_segments=True)
+        _draw_phase_bands(ax_a, label_segments=True)
         ax_a.set_ylabel("α_baseline\n(0=src, 1=tgt)")
         ax_a.legend(loc="upper right", fontsize=7)
         ax_a.grid(alpha=0.3)
@@ -669,28 +688,20 @@ if args.save_plots:
             bld  = bl_a[:, jidx] * asc
             diff = (src - tgt)            # policy disagreement; zero → no difference
 
-            # Background shading: source-hold region blue, target-hold orange
-            src_mask = alpha_base_1d < 0.05
-            tgt_mask = alpha_base_1d > 0.95
-            ax.fill_between(t_axis, ax.get_ylim()[0] if hasattr(ax, '_ylim') else -1,
-                            ax.get_ylim()[1] if hasattr(ax, '_ylim') else 1,
-                            where=src_mask, alpha=0.08, color="C0", step="post")
-            ax.fill_between(t_axis, -1, 1, where=tgt_mask,
-                            alpha=0.08, color="C1", step="post")
-
+            # Phase bands drawn by _draw_phase_bands below
             ax.plot(t_axis, src,  label="π_src",  lw=0.8, alpha=0.7, c="C0")
             ax.plot(t_axis, tgt,  label="π_tgt",  lw=0.8, alpha=0.7, c="C1")
             ax.plot(t_axis, bld,  label="blended", lw=1.2, c="C2")
             ax.plot(t_axis, diff, label="src−tgt", lw=0.7, ls="--", c="C5", alpha=0.8)
             ax.axhline(0, c="k", lw=0.3)
-            _draw_phase_lines(ax, label_segments=(k == 0))
+            _draw_phase_bands(ax, label_segments=(k == 0))
             ax.set_ylabel(f"{leg}_{jt} [rad]")
             ax.legend(loc="upper right", fontsize=6, ncol=2)
             ax.grid(alpha=0.3)
         axes[-1].set_xlabel("time [s]")
         fig.suptitle(f"{jt_fullname[jt]} — joint offset [rad]  |  {method_label}\n"
                      f"src−tgt≠0 → policies differ (blending does real work)  "
-                     f"blue-bg=src-hold  orange-bg=tgt-hold")
+                     f"blue=src-hold  purple=transition  orange=tgt-hold")
         fig.tight_layout()
         fig.savefig(out_dir / f"blend_{jt}.png", dpi=120)
         plt.close(fig)
@@ -706,8 +717,8 @@ if args.save_plots:
     axes[2].plot(t_axis, tilt_a, lw=1.0)
     axes[2].set_ylabel("|grav_xy|²"); axes[2].set_xlabel("time [s]"); axes[2].grid(alpha=0.3)
     for ax in axes:
-        _draw_phase_lines(ax, label_segments=True)
-    fig.suptitle("Body state  (red=swap  green=ramp-start  orange=ramp-end)")
+        _draw_phase_bands(ax, label_segments=True)
+    fig.suptitle("Body state  (blue=src-hold  purple=transition  orange=tgt-hold)")
     fig.tight_layout()
     fig.savefig(out_dir / "body_state.png", dpi=120)
     plt.close(fig)
@@ -724,7 +735,7 @@ if args.save_csv:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="") as f:
         w = csv.writer(f)
-        header = (["t", "current", "target", "vx", "h", "tilt",
+        header = (["t", "current", "target", "vx", "h", "tilt", "alpha_base",
                    "dFL", "dFR", "dRL", "dRR",
                    "power_W", "x_w"]
                   + [f"jp{i}" for i in range(12)]
@@ -734,7 +745,7 @@ if args.save_csv:
         w.writerow(header)
         for k in range(args.steps):
             row = [k * control_dt, gait_hist[k][0], gait_hist[k][1],
-                   vx_a[k], h_a[k], tilt_a[k],
+                   vx_a[k], h_a[k], tilt_a[k], alpha_base_1d[k],
                    *delta_a[k].tolist(), p_a[k], x_a[k],
                    *jp_a[k].tolist(), *jv_a[k].tolist(),
                    *ja_a[k].tolist(), *tq_a[k].tolist()]
