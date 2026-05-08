@@ -33,6 +33,8 @@ parser.add_argument("--warmstart", type=str, default=None,
                          "The first linear layer of actor and critic is extended "
                          "by appending zero-initialised columns for new obs dims. "
                          "Noise std is reset to the configured init_noise_std.")
+parser.add_argument("--rew_residual_sparsity", type=float, default=None,
+                    help="Override rew_residual_sparsity. Use 0.0 for the no-sparsity ablation.")
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -120,6 +122,9 @@ env_cfg = B1Phase2EnvCfg()
 env_cfg.scene.num_envs = args.num_envs
 env_cfg.sim.device = agent_cfg.device
 env_cfg.seed = args.seed
+if args.rew_residual_sparsity is not None:
+    env_cfg.rew_residual_sparsity = args.rew_residual_sparsity
+    print(f"  [override] rew_residual_sparsity = {args.rew_residual_sparsity}")
 
 # Verify all four base policy checkpoints exist
 for path in env_cfg.base_policy_paths:

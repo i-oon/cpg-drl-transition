@@ -30,9 +30,9 @@ Across **60 transition windows** (10 seeds × 6 gait-pair transitions each):
 |---|---:|---:|---:|
 | Discrete Switch | 10223 | **4824** | 16586 |
 | Smoothstep Ramp | 8291 | 2567 | 12426 |
-| **v10 Residual (Ours)** | **7694** | **2205** | **10228** |
+| **Residual (Ours)** | **7694** | **2205** | **10228** |
 
-**Jerk — the rate of change of acceleration (rad/s³) — is the physically correct metric for motor stress.** Transition-window jerk (`jerk_TRANS`) is measured only during the 3 s blending window where methods differ; both run identical frozen base policies during steady state. Discrete's std=4824 means transitions swing from fine (3257) to catastrophic (16586) depending on leg phase at switch time. v10 achieves the lowest mean AND lowest variance — consistently smooth regardless of which gait pair is switching.
+**Jerk — the rate of change of acceleration (rad/s³) — is the physically correct metric for motor stress.** Transition-window jerk (`jerk_TRANS`) is measured only during the 3 s blending window where methods differ; both run identical frozen base policies during steady state. Discrete's std=4824 means transitions swing from fine (3257) to catastrophic (16586) depending on leg phase at switch time. Our Residual method achieves the lowest mean AND lowest variance — consistently smooth regardless of which gait pair is switching.
 
 ---
 
@@ -46,7 +46,7 @@ We demonstrate **per-leg residual transition learning** for a heavy quadruped (U
 
 A residual MLP outputs a 4-D per-leg correction `Δα ∈ [0, +0.3]` (asymmetric — can only advance α above the smoothstep baseline, never delay it) that is added to a hand-designed **smoothstep** baseline `α_baseline = x²(3−2x) ∈ [0, 1]`. The corrected α blends the outputs of two frozen base policies (one per gait) at the joint-target level. The residual is **time-gated** to be exactly zero outside the transition window — guaranteeing source and target gaits run untouched during steady-state holds — and **L2-penalized** during transitions to encourage minimal intervention.
 
-**Key result (v10) — at training-distribution duration (3 s ramp), 60-window evaluation (10 seeds × 6 gait-pair transitions):**
+**Key result (Residual) — at training-distribution duration (3 s ramp), 60-window evaluation (10 seeds × 6 gait-pair transitions):**
 - **Lowest jerk_TRANS mean** across all methods: 7694 rad/s³ (vs discrete 10223, smoothstep 8291)
 - **Lowest jerk_TRANS std**: 2205 (vs discrete 4824, smoothstep 2567) — consistently smooth regardless of gait pair or seed
 - **19.8 % lower jerk_TRANS** vs smoothstep baseline on seed=42 6-pair run (7965 vs 9926 rad/s³)
@@ -54,7 +54,7 @@ A residual MLP outputs a 4-D per-leg correction `Δα ∈ [0, +0.3]` (asymmetric
 - Mean forward velocity **+0.431 m/s** (commanded +0.4 m/s, +5.4 % vs smoothstep, seed=42)
 - Zero episode terminations across all evaluated runs
 
-**Scope of the claim (duration-specific):** v10 was trained at a fixed 3 s transition duration. The gain does not generalise uniformly across durations — it is best at d = 2–3 s, converges to the smoothstep baseline at d = 5 s (easy ramp, MLP adds nothing), and both methods fail below d ≈ 1 s (architectural ceiling of the frozen-base-policy blending approach). See [Duration Sweep](#duration-sweep) for the full 5-point sweep.
+**Scope of the claim (duration-specific):** The Residual policy was trained at a fixed 3 s transition duration. The gain does not generalise uniformly across durations — it is best at d = 2–3 s, converges to the smoothstep baseline at d = 5 s (easy ramp, MLP adds nothing), and both methods fail below d ≈ 1 s (architectural ceiling of the frozen-base-policy blending approach). See [Duration Sweep](#duration-sweep) for the full 5-point sweep.
 
 **The architectural change in v10**: the residual is squashed via `sigmoid(action) × 0.3` so `Δα ∈ [0, 0.3]` instead of v7's `tanh(action) × 0.8` giving `Δα ∈ [−0.8, +0.8]`. The asymmetric clamp prevents α from ever falling below the smoothstep baseline — eliminating a "delay-rush" exploit (Δα < 0 in early ramp, then surge) that v7 had been silently using to minimize mid-α blending time at the cost of velocity dips. v10 reaches comparable tracking (+0.431 vs +0.433 m/s) with **lower transition-window jerk and 23 % lower velocity variance**.
 
@@ -298,7 +298,7 @@ RL and RR show larger corrections than FL and FR — consistent with the morphol
 
 ---
 
-### v10 Diagnostic Plots
+### Residual Diagnostic Plots
 
 All figures from a single 2000-step evaluation run (seed=42, trot→bound→pace cycling, switch every 8 s, transition window 3 s).
 
@@ -362,7 +362,7 @@ Seven transition-control methods evaluated on identical episodes (2000 steps, tr
 | **(d) E2E PPO** | MLP learns 1-D scalar α = sigmoid(action) directly via PPO. No baseline ramp. | 1-D sigmoid |
 | **(e) E2E Rate** | MLP outputs dα/dt = sigmoid(action)/T; α integrated from 0 each episode. No baseline ramp. | 1-D rate |
 | **(f) Residual-1D** | Smoothstep baseline + scalar Δα broadcast to all 4 legs. | 1-D tanh |
-| **(g) Residual-4D / v10 (Ours)** | Smoothstep baseline + per-leg Δα (asymmetric clamp `[0, 0.3]` via sigmoid). | 4-D sigmoid |
+| **(g) Residual-4D (Ours)** | Smoothstep baseline + per-leg Δα (asymmetric clamp `[0, 0.3]` via sigmoid). | 4-D sigmoid |
 
 ### Results (seed=42)
 
@@ -376,38 +376,38 @@ Numbers from a 2500-step, 6-gait-pair evaluation run (trot→bound→pace→trot
 | E2E PPO | +0.405 | **0.089** | −0.103 | **0.132** | 0.412 | **1.643** | 8027 |
 | E2E Rate | +0.415 | 0.129 | −0.628 | 0.194 | 0.410 | 2.163 | 12369 |
 | Residual-1D | +0.411 | 0.134 | −0.095 | 0.199 | 0.405 | 2.107 | 8606 |
-| **Residual-4D v10 (Ours)** | **+0.431** | 0.102 | **+0.005** | 0.188 | 0.406 | 2.452 | **7965** |
+| **Residual-4D (Ours)** | **+0.431** | 0.102 | **+0.005** | 0.188 | 0.406 | 2.452 | **7965** |
 
-**Why `jerk_TRANS`, not `jerk_ALL`.** All methods run identical frozen base policies during steady-state holds; their jerk difference in steady state is noise. The physically meaningful comparison is during the 3 s transition window where each method's blending strategy determines motor stress. `jerk_TRANS` isolates exactly that window. Under `jerk_ALL`, E2E PPO scores best (it collapses to a fast transition then runs target gait cleanly for most of the episode); under `jerk_TRANS`, v10 scores best — the correct result.
+**Why `jerk_TRANS`, not `jerk_ALL`.** All methods run identical frozen base policies during steady-state holds; their jerk difference in steady state is noise. The physically meaningful comparison is during the 3 s transition window where each method's blending strategy determines motor stress. `jerk_TRANS` isolates exactly that window. Under `jerk_ALL`, E2E PPO scores best (it collapses to a fast transition then runs target gait cleanly for most of the episode); under `jerk_TRANS`, the Residual method scores best — the correct result.
 
 **Transition-window jerk profile** — jerk RMS in 10 equal 0.3 s bins across the transition window, averaged over all 6 gait-pair transitions:
 
 ![Transition jerk profile](logs/phase2/transition_jerk_profile.png)
 
-The grouped bars show the *distribution* of jerk energy across the 3 s window per method. Discrete Switch (red) remains elevated uniformly across all 10 bins — the body state mismatch from the instant switch persists for the full 3 s recovery period. Smoothstep (green) has a distributed plateau. v10 (blue) is consistently the lowest across most bins, especially in the middle of the transition where coordination-structure changes are most demanding. Generated by `scripts/plot_transition_jerk.py`.
+The grouped bars show the *distribution* of jerk energy across the 3 s window per method. Discrete Switch (red) remains elevated uniformly across all 10 bins — the body state mismatch from the instant switch persists for the full 3 s recovery period. Smoothstep (green) has a distributed plateau. Residual (blue) is consistently the lowest across most bins, especially in the middle of the transition where coordination-structure changes are most demanding. Generated by `scripts/plot_transition_jerk.py`.
 
 #### Why the residual MLP is needed despite Smoothstep_Ramp's lower CoT
 
-Smoothstep_Ramp wins Cost-of-Transport (2.053 vs v10's 2.452 — about 19 % more efficient). At first glance this raises the question: why bother with the MLP at all if the passive smoothstep is more energy-efficient?
+Smoothstep_Ramp wins Cost-of-Transport (2.053 vs Residual's 2.452 — about 19 % more efficient). At first glance this raises the question: why bother with the MLP at all if the passive smoothstep is more energy-efficient?
 
-The answer is in the **jerk_TRANS** and **vx_min** columns. Smoothstep_Ramp's `vx_min = −0.160 m/s` (seed=42 worst window) means the robot can momentarily reverse direction during a transition — a stagger-and-recover pattern visible in `body_state.png`. On a 50 kg machine this is the dangerous failure mode the MLP exists to prevent. Across 60 windows, v10 achieves both lower mean jerk (7694 vs 8291) and lower variance (2205 vs 2567) — it is more consistently smooth than smoothstep on every transition.
+The answer is in the **jerk_TRANS** and **vx_min** columns. Smoothstep_Ramp's `vx_min = −0.160 m/s` (seed=42 worst window) means the robot can momentarily reverse direction during a transition — a stagger-and-recover pattern visible in `body_state.png`. On a 50 kg machine this is the dangerous failure mode the MLP exists to prevent. Across 60 windows, the Residual achieves both lower mean jerk (7694 vs 8291) and lower variance (2205 vs 2567) — it is more consistently smooth than smoothstep on every transition.
 
 Concretely:
 
-| Metric (sorted by what each method optimizes) | Smoothstep | v10 | Interpretation |
-|---|---:|---:|---|
-| **vx_min** | **−0.160** | **+0.005** | Smoothstep reverses; v10 never does |
-| vx_std | 0.133 | 0.102 | v10 has 23 % less velocity variance |
-| vx_mean | +0.409 | +0.431 | v10 tracks the +0.4 m/s command 5.4 % more accurately |
-| **jerk_TRANS** | **9926** | **7965** | **v10 is 19.8 % smoother during transitions** |
-| CoT | 2.053 | 2.452 | Smoothstep is 19 % more energy-efficient |
-| tilt_max | 0.185 | 0.188 | Within noise — no meaningful difference |
+| Metric | Discrete | Smoothstep | **Residual (Ours)** | Interpretation |
+|---|---:|---:|---:|---|
+| jerk_TRANS mean (60 windows) | 10223 | 8291 | **7694** | Residual lowest — continuous already beats discrete |
+| jerk_TRANS std (60 windows) | 4824 | 2567 | **2205** | Residual most consistent — discrete is erratic |
+| **jerk_TRANS** (seed=42) | 10414 | 9926 | **7965** | Residual −19.8% vs smoothstep, −23.5% vs discrete |
+| vx_std | 0.101 | 0.133 | **0.102** | Residual and discrete similar; smoothstep most variable |
+| vx_mean | +0.436 | +0.409 | **+0.431** | All comparable during steady-state holds |
+| CoT | 3.088 | **2.053** | 2.452 | Smoothstep most efficient; Residual pays 19% for smoothness |
 
-**Reframing the tradeoff.** It is not "smooth-motion-vs-energy." It is "*graceful-vs-dangerous*-transitions, paid for in energy." The 19 % CoT increase is the cost of buying a safety margin against velocity reversal at transitions — a margin that becomes critical the moment the robot leaves flat ground at 0.4 m/s (uneven terrain, faster speeds, payload, real-world outdoor conditions). For battery-constrained tame deployment, smoothstep is fine. For anything near the stability envelope, the MLP earns its 19 % energy bill.
+**Two-level story.** Continuous scheduling (smoothstep) already beats discrete on jerk mean (8291 vs 10223) and variance (2567 vs 4824) — so the first win is simply *having a schedule at all*. The Residual then improves further on top of smoothstep: −7.2% mean jerk, −14% variance, at the cost of 19% more energy. The 19% CoT increase buys predictable, consistently smooth transitions regardless of which gait pair is switching — a safety margin that becomes critical on uneven terrain or at higher speeds.
 
-#### Jerk-weight sweep — v10's hyperparameter is empirically optimal
+#### Jerk-weight sweep — hyperparameter is empirically optimal
 
-To verify v10's `rew_joint_jerk = −1e-10` weight isn't an arbitrary choice, the same architecture (sigmoid clamp `[0, 0.3]`) was retrained at 5 weights spanning two orders of magnitude. Result:
+To verify the Residual's `rew_joint_jerk = −1e-10` weight isn't an arbitrary choice, the same architecture (sigmoid clamp `[0, 0.3]`) was retrained at 5 weights spanning two orders of magnitude. Result:
 
 ![Jerk-weight Pareto sweep](logs/phase2/sweep_jerk_pareto.png)
 
@@ -419,12 +419,12 @@ To verify v10's `rew_joint_jerk = −1e-10` weight isn't an arbitrary choice, th
 | `sweep_w_hi` | −5e-10 | 11125 | 2.59 | +0.438 | Over-strong → MLP exploits compressed-jump (also jerky) |
 | `sweep_w_xhi` | −1e-9 | 11430 | 2.09 | +0.405 | Collapse — MLP gives up correcting, vx_tracking falls |
 
-Both `jerk_RMS` and `CoT` form a **U-shape** with the minimum at v10's `−1e-10`. Stronger penalty does not produce smoother motion — it pushes the MLP into compression strategies that are themselves jerky. This pattern (anti-monotonic above the sweet spot) refines the earlier "smoothness costs energy" claim:
+Both `jerk_RMS` and `CoT` form a **U-shape** with the minimum at `−1e-10`. Stronger penalty does not produce smoother motion — it pushes the MLP into compression strategies that are themselves jerky. This pattern (anti-monotonic above the sweet spot) refines the earlier "smoothness costs energy" claim:
 
 - *Within* the residual paradigm, jerk and CoT are positively correlated and both minimized at the same weight setting. There is no internal tradeoff to navigate.
 - *Across* paradigms (residual vs passive), there is a fixed cost: choosing to have an MLP at all costs ~19 % CoT vs Smoothstep_Ramp (2.452 vs 2.053), regardless of the smoothness pressure level.
 
-So v10's hyperparameter choice is empirically justified: it is the operating point that simultaneously minimizes jerk *and* CoT among residual variants.
+The final hyperparameter choice is empirically justified: it is the operating point that simultaneously minimizes jerk *and* CoT among residual variants.
 
 ### Per-method gait diagrams
 
@@ -468,7 +468,7 @@ So v10's hyperparameter choice is empirically justified: it is the operating poi
 
 ---
 
-**(g) Residual-4D / v10 (Ours)** — Smoothstep baseline + per-leg Δα with asymmetric clamp (sigmoid → [0, 0.3]). Best jerk_TRANS (7965) AND best vx_min (+0.005 — never reverses). Clear gait pattern changes visible after each transition. The MLP advances α above the smoothstep baseline only when the rear legs need transient acceleration; remains silent otherwise.
+**(g) Residual-4D (Ours)** — Smoothstep baseline + per-leg Δα with asymmetric clamp (sigmoid → [0, 0.3]). Best jerk_TRANS (7965) AND best vx_min (+0.005 — never reverses). Clear gait pattern changes visible after each transition. The MLP advances α above the smoothstep baseline only when the rear legs need transient acceleration; remains silent otherwise.
 
 ![Residual v7 gait diagram](logs/phase2/phase2_v10/diag/gait_diagram.png)
 
@@ -480,7 +480,7 @@ So v10's hyperparameter choice is empirically justified: it is the operating poi
 
 **Single-seed summary (seed=42, 6 windows):**
 
-| | Discrete | Residual-4D v10 | Change |
+| | Discrete | Residual-4D (Ours) | Change |
 |---|---:|---:|---:|
 | **jerk_TRANS** | **10414** | **7965** | **−23.5%** |
 | vx_mean | +0.436 | +0.431 | −1.1% (within noise) |
@@ -489,13 +489,13 @@ So v10's hyperparameter choice is empirically justified: it is the operating poi
 
 **Multi-seed summary (10 seeds × 6 windows = 60 windows each):**
 
-| | Discrete | Residual-4D v10 | Change |
+| | Discrete | Residual-4D (Ours) | Change |
 |---|---:|---:|---:|
 | **jerk_TRANS mean** | **10223** | **7694** | **−24.8%** |
 | **jerk_TRANS std** | **4824** | **2205** | **−54.3%** |
 | Worst window | 16586 | 10228 | — |
 
-Discrete's aggregate vx_mean is comparable to v10 because both run pure base policies during steady-state holds. The difference is entirely in transition quality: discrete's jerk_TRANS std=4824 means some transitions are unremarkable while others are catastrophic (worst window: 16586 on bound→pace). v10's std=2205 means every transition is predictably smooth. Discrete also pays higher CoT (3.088) because the instant switch forces large transient torques to absorb the momentum discontinuity.
+Discrete's aggregate vx_mean is comparable to the Residual because both run pure base policies during steady-state holds. The difference is entirely in transition quality: discrete's jerk_TRANS std=4824 means some transitions are unremarkable while others are catastrophic (worst window: 16586 on bound→pace). Residual's std=2205 means every transition is predictably smooth. Discrete also pays higher CoT (3.088) because the instant switch forces large transient torques to absorb the momentum discontinuity.
 
 ![Discrete vs v10 jerk overlay](logs/phase2_seed_experiment/overlay.png)
 ![60-window boxplot](logs/phase2_seed_experiment/results.png)
@@ -536,12 +536,12 @@ The only difference between these two methods is the α schedule shape — no ML
 
 #### E2E PPO vs Residual-4D (free-form α vs structured residual)
 
-| | E2E PPO | Residual-4D v10 | Change |
+| | E2E PPO | Residual-4D (Ours) | Change |
 |---|---:|---:|---:|
 | vx_mean | +0.405 | **+0.431** | **+6.4%** |
 | vx_std | **0.089** | 0.102 | +14.6% |
 | tilt_max | **0.132** | 0.188 | +42.4% |
-| **jerk_TRANS** | 8027 | **7965** | **v10 −0.8% (essentially tied)** |
+| **jerk_TRANS** | 8027 | **7965** | **Residual −0.8% (essentially tied)** |
 | CoT | **1.643** | 2.452 | +49.2% |
 
 This comparison is particularly revealing under the `jerk_TRANS` metric. E2E PPO's apparent jerk advantage (previously 7518 vs 9392 on `jerk_ALL`) disappears when measured at transition windows only: both score ~8000 rad/s³. E2E's `jerk_ALL` advantage was an artifact — it collapses to a fast transition (~1 s) then runs the target gait cleanly for most of the episode, giving it low steady-state jerk that dominates the aggregate. Residual-4D wins on velocity tracking (+6.4%) at the cost of higher tilt (the MLP cannot suppress the kinematic floor at the gait-midpoint) and higher energy (CoT +49%). E2E is preferable when energy and tilt matter most; Residual is preferable when velocity tracking matters most.
@@ -582,7 +582,7 @@ Both E2E variants collapse to a degenerate solution, but in opposite directions.
 
 #### Smoothstep Ramp vs Residual-4D (value of the learned MLP)
 
-| | Smoothstep | Residual-4D v10 | Change |
+| | Smoothstep | Residual-4D (Ours) | Change |
 |---|---:|---:|---:|
 | vx_mean | +0.409 | **+0.431** | **+5.4%** |
 | vx_std | 0.133 | **0.102** | **−23.3%** |
@@ -605,7 +605,7 @@ This is the cleanest measure of what the MLP contributes — both methods share 
 
 #### Residual-1D vs Residual-4D (per-leg vs scalar)
 
-| | Residual-1D | Residual-4D v10 | Change |
+| | Residual-1D | Residual-4D (Ours) | Change |
 |---|---:|---:|---:|
 | vx_mean | +0.411 | **+0.431** | **+4.9%** |
 | vx_std | 0.134 | **0.102** | **−23.9%** |
@@ -637,33 +637,33 @@ The per-leg structure shows a clear advantage on the 6-pair evaluation. Residual
 | **E2E Rate vs E2E PPO** | Does rate-integration prevent fast-collapse? | Introduces opposite collapse (rate→0, α never rises); worst jerk_TRANS (12369) |
 | **Residual-1D vs Residual-4D** | Does per-leg granularity help? | Yes — 4D eliminates reversal, +4.9% vx, −7.4% jerk_TRANS |
 | With vs without time-gating | Is gating necessary? | Tested in v2→v3 — removing gating degrades to 0.160 m/s |
-| With vs without sparsity penalty | Is sparsity term necessary? | Pending (isolated experiment not run) |
+| **With vs without sparsity penalty** | Is sparsity term necessary? | Yes — without it, \|Δα\| mean 11× larger (0.049 vs 0.004), jerk_TRANS +10% (8509 vs 7733), std +40% (2672 vs 1908). MLP intervenes aggressively throughout the window instead of minimally. |
 
 ---
 
 ## Duration Sweep
 
-To understand how v10's advantage depends on the transition speed it was trained at, both v10 and Smoothstep_Ramp were evaluated at five durations without retraining (v10 checkpoint is fixed at the d=3 s training point):
+To understand how the Residual's advantage depends on the transition speed it was trained at, both the Residual and Smoothstep_Ramp were evaluated at five durations without retraining (Residual checkpoint fixed at the d=3 s training point):
 
 ![Duration sweep](logs/phase2/duration_sweep/duration_sweep.png)
 
-| Duration | v10 jerk_TRANS | Smoothstep jerk_TRANS | v10 vx_min | Smoothstep vx_min | Verdict |
+| Duration | Residual jerk_TRANS | Smoothstep jerk_TRANS | Residual vx_min | Smoothstep vx_min | Verdict |
 |---:|---:|---:|---:|---:|---|
 | 0.5 s | 13063 | 11324 | negative | negative | Both fail — architectural ceiling |
 | 1.0 s | ~11000 | ~11000 | negative | negative | Both fail |
-| 2.0 s | — | — | positive | negative | v10 wins |
-| **3.0 s** | **7965** | **9926** | **+0.005** | **−0.160** | **v10 wins (training dist)** |
+| 2.0 s | — | — | positive | negative | Residual wins |
+| **3.0 s** | **7965** | **9926** | **+0.005** | **−0.160** | **Residual wins (training dist)** |
 | 5.0 s | ~10500 | ~10500 | — | — | Methods converge |
 
 **Three regimes:**
 
-- **Catastrophic (d ≤ 1.0 s):** Both methods fail — vx_min in the negatives, robot reverses direction. At d=0.5 s, v10's jerk_TRANS (13063) is *higher* than smoothstep's (11324) — the MLP makes things worse when both are failing. This is the **architectural ceiling** of frozen-base-policy blending: 25–50 control steps is too few to interpolate between gait phases. No bounded residual can fix this.
+- **Catastrophic (d ≤ 1.0 s):** Both methods fail — vx_min in the negatives, robot reverses direction. At d=0.5 s, the Residual's jerk_TRANS (13063) is *higher* than smoothstep's (11324) — the MLP makes things worse when both are failing. This is the **architectural ceiling** of frozen-base-policy blending: 25–50 control steps is too few to interpolate between gait phases. No bounded residual can fix this.
 
-- **Sweet spot (d = 2–3 s):** v10 wins on every smoothness and stability metric. At d=3 s (training distribution): jerk_TRANS −19.8%, vx_min reversal eliminated.
+- **Sweet spot (d = 2–3 s):** Residual wins on every smoothness and stability metric. At d=3 s (training distribution): jerk_TRANS −19.8%, vx_min reversal eliminated.
 
 - **Easy (d = 5.0 s):** Methods converge — essentially tied. The MLP adds nothing when the ramp is gentle enough that the smoothstep baseline alone is sufficient.
 
-**Interpretation:** v10 is specialized to its training distribution. Performance degrades on both sides (faster and slower transitions). The 19.8% jerk_TRANS improvement at d=3 s is the actual gain — it does not compound with difficulty nor does it transfer without retraining.
+**Interpretation:** The Residual policy is specialized to its training distribution. Performance degrades on both sides (faster and slower transitions). The 19.8% jerk_TRANS improvement at d=3 s is the actual gain — it does not compound with difficulty nor does it transfer without retraining.
 
 **v11 — curriculum training attempt:** To test duration generalization, v11 was trained with transition duration sampled uniformly from [1.5, 5.0] s per episode, and a normalized duration feature added to the observation (46-D). Two runs both diverged — action noise std escalated from 0.1 → 14+ over training (entropy-driven noise spiral caused by high cross-duration return variance in each rollout batch). The policy never converged. Warm-starting from a fixed-duration checkpoint prior to curriculum expansion is the natural next step and is left as future work.
 
@@ -679,21 +679,36 @@ Three Δα bound geometries were tried in sequence:
 
 - **Tight symmetric (`tanh × 0.2`, ±0.2 range)**: MLP saturates at the bound everywhere and the robot stands still — alive-bonus exploit. Bound is too small to make corrections that earn velocity tracking against the standing-still baseline.
 - **Wide symmetric (`tanh × 0.8`, ±0.8 range)**: works, achieves +0.43 m/s tracking, but the MLP exploits negative-Δα to **delay then rush** the smoothstep ramp. This compresses time spent in the kinematically-jerky mid-α region (which lowers jerk_RMS) but produces velocity dips at every transition (vx_min = −0.045 — robot momentarily reverses direction). The exploit was hidden behind the jacc_RMS metric for many iterations.
-- **Asymmetric (`sigmoid × 0.3`, [0, 0.3] range)**: exploit eliminated by construction — α can only ride at or above smoothstep, never below. Minimal capability cost: in retrospect, every legitimate Δα < 0 produced by the wide-symmetric MLP was *part of* the delay-rush exploit. v10 with this clamp achieves comparable tracking (+0.431 m/s) AND has +0.005 vx_min (no reversal) AND 19.8 % lower transition-window jerk.
+- **Asymmetric (`sigmoid × 0.3`, [0, 0.3] range)**: exploit eliminated by construction — α can only ride at or above smoothstep, never below. Minimal capability cost: in retrospect, every legitimate Δα < 0 produced by the wide-symmetric MLP was *part of* the delay-rush exploit. The final Residual with this clamp achieves comparable tracking (+0.431 m/s) AND has +0.005 vx_min (no reversal) AND 19.8 % lower transition-window jerk.
 
 ### Finding 2 — Reward design: `jacc_RMS` is a smoothness imposter
 
 For ~5 polish iterations we used `dof_acc_l2` (joint-acceleration L2) as a "smoothness" penalty. This is the wrong signal — a sustained-high-acceleration trajectory has zero jerk yet large `jacc²`. The motor-relevant smoothness signal is **jerk** = `(q̈_t − q̈_{t-1}) / dt` (rad/s³). Adding an explicit jerk penalty revealed:
 
 - Weight `−5e-10` (over-strong): MLP collapsed to a "compressed-jump" strategy — squeeze the entire transition into ~1 step to minimize integrated jerk. Velocity tracking dropped to +0.398 m/s.
-- Weight `−1e-10` (tuned): jerk_TRANS drops to 7965, velocity tracking preserved at +0.431 m/s. This is the weight v10 inherits.
+- Weight `−1e-10` (tuned): jerk_TRANS drops to 7965, velocity tracking preserved at +0.431 m/s. This is the weight the final Residual uses.
 - Weight `0` (no penalty) + `tanh` clamp: this was v7's setup, which scored well on jacc_RMS while silently using the delay-rush exploit. The metric and reward have to match the spoken claim, or the policy will exploit the gap.
 
 ### Finding 3 — Implementation: per-policy `_base_last_actions` buffer (the 3-day bug)
 
 Frozen base policies must be queried with **their own previous output** as `last_action`, not zeros. Passing zeros makes all base policies see "I just did nothing" → they all collapse to default joint pose → the residual MLP can't blend coherent gaits. The bug is invisible in training-time playback because the residual masks the collapse during the active ramp window. Cost ~3 days to find. The fix is per-policy buffers `_base_last_actions[i]` updated each step with policy `i`'s own output.
 
-### Finding 4 — Three-gait portfolio + hard time-gating
+### Finding 4 — Sparsity penalty is load-bearing
+
+Removing `rew_residual_sparsity` (setting to 0.0) while keeping everything else identical produces a policy where the MLP intervenes aggressively throughout the entire transition window rather than making minimal corrections:
+
+| | No Sparsity | With Sparsity (−3.0) |
+|---|---:|---:|
+| \|Δα\| mean | 0.049 | **0.004** |
+| jerk_TRANS mean | 8509 | **7733** |
+| jerk_TRANS std | 2672 | **1908** |
+| vx_mean | 0.428 | **0.431** |
+
+Without sparsity pressure, the MLP learns to saturate Δα throughout the window (mean 0.049, max 0.3), treating the full window as an opportunity for large corrections rather than minimal intervention. This produces 11× more |Δα| output and 10% higher jerk. The high action noise std during training (4.63 vs the final Residual's converged value) confirms the policy never settles into sparse, precise corrections.
+
+The sparsity term is not just a regularizer for explainability — it is structurally necessary for the MLP to learn the "silent except when needed" behavior that underlies the jerk improvement.
+
+### Finding 5 — Three-gait portfolio + hard time-gating
 
 Phase 1 produced four base policies (trot, bound, pace, steer). Phase 2 keeps only three: **steer is dropped** because it was trained with `yaw ∈ (0.4, 1.0)` — at Phase 2's fixed `yaw=0` it produces out-of-distribution joint targets that corrupt any blend involving it. The remaining three (trot, bound, pace) all share the forward-only training distribution and produce coherent outputs under Phase 2's velocity command.
 
@@ -701,7 +716,7 @@ Combined with hard **time-gating** (`Δα = 0` outside the transition window), t
 
 ### Final architecture summary
 
-| Component | v10 final |
+| Component | Final Residual |
 |---|---|
 | Δα clamp | `sigmoid(action) × 0.3` → ∈ [0, 0.3] (no delay possible) |
 | Time-gating | Hard zero outside transition window |
@@ -714,19 +729,19 @@ Combined with hard **time-gating** (`Δα = 0` outside the transition window), t
 
 ### Seed Robustness — 60-Window Evaluation
 
-To robustly compare methods, all three key methods were evaluated across **10 environment seeds × 6 gait-pair transitions = 60 windows each** using a fixed v10 checkpoint (no retraining per seed — only environment domain randomization varies).
+To robustly compare methods, all three key methods were evaluated across **10 environment seeds × 6 gait-pair transitions = 60 windows each** using a fixed Residual checkpoint (no retraining per seed — only environment domain randomization varies).
 
 | Method | N windows | jerk_TRANS mean | jerk_TRANS std | Min | Max |
 |---|---:|---:|---:|---:|---:|
 | Discrete Switch | 60 | 10223 | **4824** | 3257 | 16586 |
 | Smoothstep Ramp | 60 | 8291 | 2567 | 4146 | 12426 |
-| **v10 Residual (Ours)** | **60** | **7694** | **2205** | **4284** | **10228** |
+| **Residual (Ours)** | **60** | **7694** | **2205** | **4284** | **10228** |
 
 ![60-window jerk boxplot](logs/phase2_seed_experiment/results.png)
 
-v10 achieves the lowest mean (7694) and the lowest variance (std=2205) across all 60 windows. Notably, discrete's variance (std=4824) is more than twice v10's — discrete transitions are unpredictable: some windows are fine, others are catastrophic. The worst-case window for discrete (16586, bound→pace) is 62% higher than v10's worst case (10228).
+The Residual achieves the lowest mean (7694) and the lowest variance (std=2205) across all 60 windows. Notably, discrete's variance (std=4824) is more than twice the Residual's — discrete transitions are unpredictable: some windows are fine, others are catastrophic. The worst-case window for discrete (16586, bound→pace) is 62% higher than the Residual's worst case (10228).
 
-The 10-seed sweep also revealed that discrete's behavior is **phase-deterministic**: all 10 seeds produce identical per-window jerk values. The variance comes from which gait pair is transitioning, not from domain randomization. The bound→pace transition (window 2, t=10s) is consistently the worst for discrete (jerk=13619, vx_min=−0.463) while v10 handles it cleanly.
+The 10-seed sweep also revealed that discrete's behavior is **phase-deterministic**: all 10 seeds produce identical per-window jerk values. The variance comes from which gait pair is transitioning, not from domain randomization. The bound→pace transition (window 2, t=10s) is consistently the worst for discrete (jerk=13619, vx_min=−0.463) while the Residual handles it cleanly.
 
 ![Jerk overlay — worst window](logs/phase2_seed_experiment/overlay.png)
 
@@ -736,7 +751,7 @@ The 10-seed sweep also revealed that discrete's behavior is **phase-deterministi
 
 ### 1. Fixed transition duration (3 s)
 
-Every transition in this project uses a 3 s ramp window, hardcoded at training time. The duration sweep confirmed this is a training-distribution artifact: v10 outperforms the smoothstep baseline at d = 2–3 s and converges to it at d = 5 s. The duration does not reflect any physical optimum — it was chosen to make the graphs readable.
+Every transition in this project uses a 3 s ramp window, hardcoded at training time. The duration sweep confirmed this is a training-distribution artifact: the Residual policy outperforms the smoothstep baseline at d = 2–3 s and converges to it at d = 5 s. The duration does not reflect any physical optimum — it was chosen to make the graphs readable.
 
 Biological systems and real robots do not switch gaits on a fixed timer. The correct formulation is to let the agent **learn the optimal transition timing and duration** for each gait pair. Architecturally this requires either: (a) making transition duration a learnable variable the policy controls (e.g., MLP outputs a "readiness signal" that triggers the next phase), or (b) curriculum training over a range of durations to produce a duration-generalising policy. Option (b) was attempted as v11 and failed to converge from random initialisation — warm-starting from a fixed-duration checkpoint is the natural next step.
 
@@ -1029,7 +1044,7 @@ cpg-drl-transition/
 - [x] Ablation: Residual-1D (scalar Δα broadcast) — trained + evaluated, vx≈Residual-4D
 - [x] 7-method comparison table with uniform metrics
 - [x] Contact sensor body-ordering bug fixed (correct foot bars in all plots)
-- [ ] With/without sparsity penalty ablation (isolated experiment)
+- [x] With/without sparsity penalty ablation — sparsity is load-bearing: without it |Δα| 11× larger, jerk_TRANS +10%, std +40%
 
 ### Week 14 — Analysis and writeup ✅
 - [x] All ablation results incorporated into comparison table
