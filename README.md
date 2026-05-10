@@ -674,18 +674,22 @@ To isolate whether performance differences between Residual-α 4D and Residual-q
 | **α-space** (blending weight) | Residual-α 4D ← our method | Residual-α 12D |
 | **q-space** (joint position) | Residual-q 4D | Residual-q 12D |
 
-Single-seed playback (1000 steps, seed=42, trot→bound→pace; jerk_ALL = full-episode RMS):
+Single-seed playback (2500 steps, seed=0, trot→bound→pace→trot→pace→bound; same conditions as main table):
 
-| Variant | vx_mean | tilt_max | h_mean | CoT | jerk_ALL |
-|---|---:|---:|---:|---:|---:|
-| **Residual-α 4D (Ours)** | **+0.453** | 0.186 | 0.407 | 2.115 | 12097 |
-| Residual-q 4D | +0.453 | 0.186 | 0.407 | 2.115 | 12097 |
-| Residual-α 12D | +0.432 | 0.186 | 0.401 | 2.282 | 11684 |
-| Residual-q 12D | +0.426 | **0.247** | 0.408 | **2.045** | **10328** |
-
-> **Note:** jerk_ALL includes steady-state (identical across methods); jerk_TRANS (transition-window only) is the correct metric. Full 60-window results from `bash scripts/run_ablation_seeds.sh` + `python scripts/analyze_seed_experiment.py --mode ablation` will replace these.
+| Variant | vx_mean | vx_std | vx_min | tilt_max | h_mean | CoT | **jerk_TRANS** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **Residual-α 4D (Ours)** | **+0.432** | 0.103 | **+0.004** | 0.189 | 0.406 | 2.340 | **7707** |
+| Residual-q 4D | +0.436 | **0.096** | +0.005 | **0.188** | **0.412** | **1.935** | 8360 |
+| Residual-α 12D | +0.009 | 0.030 | +0.000 | 0.241 | 0.007 | 2.161 | 12087 |
+| Residual-q 12D | +0.431 | 0.105 | −0.037 | 0.186 | 0.406 | 3.004 | 9762 |
 
 **Preliminary observations:** Residual-α 12D converges to near-degenerate corrections (|Δα| mean ≈ 0.001, std ≈ 0.003–0.008) — the 12D sigmoid output collapses toward zero and lets smoothstep do all the work. This suggests the 12D α-space search is over-parameterized for this task: the MLP finds it easier to output zeros than to learn 12 independent per-joint timing corrections. Residual-q 12D remains active (std ≈ 0.015–0.034) but pays higher tilt. Residual-q 4D and Residual-α 4D show similar single-seed metrics, making the dimension effect more important than the space effect at 4D — the full seed experiment will confirm this.
+
+**Transition-window zoom — 2×2 ablation (trot→bound):**
+
+![Transition zoom — 2×2 ablation](logs/phase2/transition_zoom_ablation.png)
+
+Blue = α-space; Orange = q-space. Solid = 4D; Dashed = 12D. Res-α 4D (blue solid) achieves the lowest max |joint velocity| (2.0 rad/s) and the smoothest velocity trace. Res-α 12D (blue dashed) is the degenerate variant — despite α-space output, the policy collapses to near-zero corrections so the transition is effectively just smoothstep, producing a visible spike (3.4 rad/s) in the first 0.3 s. Res-q 4D (orange solid) and Res-q 12D (orange dashed) both remain active but show slightly higher peak velocities (3.5 and 2.1 rad/s respectively). The forward velocity panel confirms Res-α 4D is the only variant that never dips noticeably during the transition window.
 
 ### Ablation Summary
 
