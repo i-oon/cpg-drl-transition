@@ -363,6 +363,7 @@ Seven transition-control methods evaluated on identical episodes (2000 steps, tr
 | **(e) E2E Rate** | MLP outputs dα/dt = sigmoid(action)/T; α integrated from 0 each episode. No baseline ramp. | 1-D rate |
 | **(f) Residual-1D** | Smoothstep baseline + scalar Δα broadcast to all 4 legs. | 1-D tanh |
 | **(g) Residual-4D (Ours)** | Smoothstep baseline + per-leg Δα (asymmetric clamp `[0, 0.3]` via sigmoid). | 4-D sigmoid |
+| **(h) Residual-Δa** | Smoothstep baseline + 12-D joint correction Δa added directly to blended output (Silver et al. original formulation). | 12-D tanh |
 
 ### Results (seed=42)
 
@@ -376,7 +377,10 @@ Numbers from a 2500-step, 6-gait-pair evaluation run (trot→bound→pace→trot
 | E2E PPO | +0.405 | **0.089** | −0.103 | **0.132** | 0.412 | **1.643** | 8027 |
 | E2E Rate | +0.415 | 0.129 | −0.628 | 0.194 | 0.410 | 2.163 | 12369 |
 | Residual-1D | +0.411 | 0.134 | −0.095 | 0.199 | 0.405 | 2.107 | 8606 |
+| Residual-Δa | +0.431 | 0.104 | −0.030 | 0.184 | 0.406 | 2.855 | 9750* |
 | **Residual-4D (Ours)** | **+0.431** | 0.102 | **+0.005** | 0.188 | 0.406 | 2.452 | **7965** |
+
+\* jerk_TRANS for Residual-Δa is the 60-window mean; single-run number not separately recorded.
 
 **Why `jerk_TRANS`, not `jerk_ALL`.** All methods run identical frozen base policies during steady-state holds; their jerk difference in steady state is noise. The physically meaningful comparison is during the 3 s transition window where each method's blending strategy determines motor stress. `jerk_TRANS` isolates exactly that window. Under `jerk_ALL`, E2E PPO scores best (it collapses to a fast transition then runs target gait cleanly for most of the episode); under `jerk_TRANS`, the Residual method scores best — the correct result.
 
@@ -626,6 +630,21 @@ The per-leg structure shows a clear advantage on the 6-pair evaluation. Residual
 </tr>
 </table>
 
+#### α-space vs action-space residual (Silver et al. original vs this work)
+
+Silver et al. (2019) define the residual as a **joint-position correction** Δa added directly to the hand-designed policy's output. This work's core departure is operating in **α-space**: the MLP corrects *when each leg transitions* rather than *what joint angles to apply*. The Residual-Δa ablation tests whether the Silver et al. formulation would have worked just as well.
+
+All design choices are held fixed — same smoothstep baseline, same time-gating, same sparsity weight (−3.0), same reward function, same PPO hyperparameters, same network size (128×128). Only the action space changes: 4-D sigmoid Δα (α-space) vs 12-D tanh Δa (action-space).
+
+| | Residual-Δa | **Residual-4D / α-space (Ours)** | Change |
+|---|---:|---:|---:|
+| jerk_TRANS mean (60 windows) | 9750 | **7694** | **−21.1%** |
+| vx_mean | +0.431 | **+0.431** | — |
+| CoT | 2.855 | **2.452** | −14.1% |
+| Action noise std (final) | 4.30 | ~0.3 | — |
+
+The α-space residual wins by 21% on jerk_TRANS and also trains more cleanly (noise std 0.3 vs 4.30 — the action-space MLP never fully settles). The reason is the **search space**: the α-space MLP needs to decide *when* each of 4 legs transitions (4 scalars). The action-space MLP must simultaneously discover *which joints* need correction and *by how much* (12 scalars) — 3× more degrees of freedom, same network capacity, same episode budget. For trot↔bound↔pace transitions where the key problem is leg-pair resynchronisation, the timing correction (α-space) is both sufficient and more learnable than the joint-position correction (action-space).
+
 **Architectural takeaway:** Both E2E collapse modes arise from the same root cause — the velocity reward is indifferent to *how* the transition happens as long as a stable gait is reached. E2E PPO collapses fast (α→1 in ~1 s), E2E Rate collapses slow (rate→0, α never rises). The residual architecture sidesteps this by design: the smoothstep baseline fixes timing structurally, and the MLP only corrects coordination. No reward engineering is needed to prevent collapse because the MLP has no control over transition timing.
 
 ### Ablation Summary
@@ -638,6 +657,7 @@ The per-leg structure shows a clear advantage on the 6-pair evaluation. Residual
 | **Residual-1D vs Residual-4D** | Does per-leg granularity help? | Yes — 4D eliminates reversal, +4.9% vx, −7.4% jerk_TRANS |
 | With vs without time-gating | Is gating necessary? | Tested in v2→v3 — removing gating degrades to 0.160 m/s |
 | **With vs without sparsity penalty** | Is sparsity term necessary? | Yes — without it, \|Δα\| mean 11× larger (0.049 vs 0.004), jerk_TRANS +10% (8509 vs 7733), std +40% (2672 vs 1908). MLP intervenes aggressively throughout the window instead of minimally. |
+| **α-space vs action-space residual** | Is per-leg timing correction better than joint-position correction? | Yes — α-space (7694) beats action-space (9750) by 21% jerk_TRANS; action-space noise std 4.30 vs 0.3, never fully converges. 12-D joint search space is 3× harder than 4-D α search with same network capacity. |
 
 ---
 
@@ -735,11 +755,12 @@ To robustly compare methods, all three key methods were evaluated across **10 en
 |---|---:|---:|---:|---:|---:|
 | Discrete Switch | 60 | 10223 | **4824** | 3257 | 16586 |
 | Smoothstep Ramp | 60 | 8291 | 2567 | 4146 | 12426 |
-| **Residual (Ours)** | **60** | **7694** | **2205** | **4284** | **10228** |
+| Residual-Δa (action-space) | 60 | 9750 | — | — | — |
+| **Residual-4D / α-space (Ours)** | **60** | **7694** | **2205** | **4284** | **10228** |
 
-![60-window jerk boxplot](logs/phase2_seed_experiment/results.png)
+![4-method 60-window jerk boxplot](logs/phase2_seed_experiment/results_4method.png)
 
-The Residual achieves the lowest mean (7694) and the lowest variance (std=2205) across all 60 windows. Notably, discrete's variance (std=4824) is more than twice the Residual's — discrete transitions are unpredictable: some windows are fine, others are catastrophic. The worst-case window for discrete (16586, bound→pace) is 62% higher than the Residual's worst case (10228).
+The Residual-4D (α-space) achieves the lowest mean (7694) and the lowest variance (std=2205) across all 60 windows. The action-space residual (Residual-Δa, mean=9750) falls between Smoothstep and Discrete — learning to correct joint positions directly does not help as much as learning when each leg transitions. Discrete's variance (std=4824) is more than twice the Residual's — discrete transitions are unpredictable: some windows are fine, others are catastrophic. The worst-case window for discrete (16586, bound→pace) is 62% higher than the Residual's worst case (10228).
 
 The 10-seed sweep also revealed that discrete's behavior is **phase-deterministic**: all 10 seeds produce identical per-window jerk values. The variance comes from which gait pair is transitioning, not from domain randomization. The bound→pace transition (window 2, t=10s) is consistently the worst for discrete (jerk=13619, vx_min=−0.463) while the Residual handles it cleanly.
 
@@ -1060,6 +1081,8 @@ cpg-drl-transition/
 - [x] Transition-window jerk profile plot added (plot_transition_jerk.py)
 - [x] 60-window seed robustness evaluation (10 seeds × 3 methods) — consistency argument confirmed
 - [x] Seed experiment analysis script + boxplot + jerk overlay plot
+- [x] Ablation: α-space vs action-space residual (Silver et al. original formulation) — α-space wins −21% jerk_TRANS; action-space noise std 4.30 never converges
+- [x] 4-method comparison boxplot (discrete + smoothstep + residual-Δa + residual-α)
 - [ ] Final video demo compilation
 - [ ] Optional: warm-start v11 from v10 checkpoint (dimension-adaptation of first layer)
 

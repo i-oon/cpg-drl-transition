@@ -31,6 +31,7 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2EnvCfg,
     B1Phase2Residual1DEnvCfg,
     B1Phase2E2ERateEnvCfg,
+    B1Phase2ActionSpaceEnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import B1FlatPPORunnerCfg
 
@@ -65,7 +66,9 @@ class B1Phase2Env(DirectRLEnv):
         # ---- Persistent buffers ----
         self._gait_current = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._gait_target = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
-        self._last_residual = torch.zeros(self.num_envs, 4, device=self.device)
+        # action-space residual stores 12-D Δa; α-space stores 4-D Δα
+        _residual_dim = 12 if cfg.action_space == 12 else 4
+        self._last_residual = torch.zeros(self.num_envs, _residual_dim, device=self.device)
         # Integrated α for e2e_rate mode — starts at 0, rises monotonically each step
         self._alpha_integrated = torch.zeros(self.num_envs, device=self.device)
         # Per-env transition start time, sampled at reset for robustness
@@ -133,13 +136,27 @@ class B1Phase2Env(DirectRLEnv):
 
         control_dt = self.cfg.sim.dt * self.cfg.decimation
 
-        if self.cfg.alpha_schedule == "e2e":
+        if self.cfg.action_space == 12:
+            # Action-space residual (Silver et al. RPL style).
+            # MLP outputs 12-D joint correction Δa; smoothstep α runs as the
+            # scalar blending schedule. Δa is time-gated identically to Δα.
+            delta_action_max = getattr(self.cfg, "delta_action_max", 0.25)
+            delta_a = torch.tanh(actions) * delta_action_max      # (E, 12) ∈ [−max, +max]
+            pad = self.cfg.residual_window_padding_s / self._transition_duration_env
+            in_window = ((ramp_progress > -pad) & (ramp_progress < 1.0 + pad)).float()
+            delta_a = delta_a * in_window.unsqueeze(1)
+            self._last_residual = delta_a.detach()
+            x = ramp_progress.clamp(0.0, 1.0)
+            alpha_baseline = x * x * (3.0 - 2.0 * x)             # always smoothstep
+            delta_alpha = torch.zeros(self.num_envs, 4, device=self.device)
+        elif self.cfg.alpha_schedule == "e2e":
             # E2E baseline: MLP outputs a single α scalar, applied uniformly.
             # No hand-designed ramp; no time-gating; no residual structure.
             alpha_scalar = torch.sigmoid(actions[:, 0])           # (E,) ∈ (0, 1)
             alpha_baseline = alpha_scalar
             delta_alpha = torch.zeros(self.num_envs, 4, device=self.device)
             self._last_residual = delta_alpha.detach()
+            delta_a = None
         elif self.cfg.alpha_schedule == "e2e_rate":
             # E2E rate-based: MLP outputs dα/dt via sigmoid, α integrates from 0.
             # rate ∈ [0, 1/transition_duration_s] so at max rate α reaches 1 in
@@ -150,6 +167,7 @@ class B1Phase2Env(DirectRLEnv):
             alpha_baseline = self._alpha_integrated
             delta_alpha = torch.zeros(self.num_envs, 4, device=self.device)
             self._last_residual = delta_alpha.detach()
+            delta_a = None
         else:
             # --- Δα residual ---
             # v10: Δα is squashed via sigmoid (NOT tanh) so Δα ∈ [0, delta_alpha_max].
@@ -181,6 +199,7 @@ class B1Phase2Env(DirectRLEnv):
             in_window = ((ramp_progress > -pad) & (ramp_progress < 1.0 + pad)).float()
             delta_alpha = delta_alpha * in_window.unsqueeze(1)  # (E, 4) — zeroed outside window
             self._last_residual = delta_alpha.detach()
+            delta_a = None
 
             # --- α_baseline schedule ---
             # "linear":      α = clamp(ramp_progress, 0, 1)             constant dα/dt
@@ -209,11 +228,17 @@ class B1Phase2Env(DirectRLEnv):
         action_current = policy_outputs[self._gait_current, env_idx]  # (E, 12)
         action_target = policy_outputs[self._gait_target, env_idx]   # (E, 12)
 
-        # --- Per-leg blending ---
-        # delta_alpha shape (E, 4) → expand to per-joint (E, 12) by repeat-3
-        delta_per_joint = delta_alpha.repeat_interleave(3, dim=1)        # (E, 12)
-        alpha_per_joint = (alpha_baseline.unsqueeze(1) + delta_per_joint).clamp(0.0, 1.0)
-        alpha_baseline_per_joint = alpha_baseline.unsqueeze(1).expand_as(alpha_per_joint).clamp(0.0, 1.0)
+        # --- Blending ---
+        if self.cfg.action_space == 12:
+            # Action-space residual: scalar smoothstep α, then add 12-D Δa correction.
+            alpha_per_joint = alpha_baseline.unsqueeze(1).expand(self.num_envs, 12).clamp(0.0, 1.0)
+            alpha_baseline_per_joint = alpha_per_joint
+        else:
+            # α-space residual: per-leg Δα corrects the blending weights.
+            delta_per_joint = delta_alpha.repeat_interleave(3, dim=1)      # (E, 12)
+            alpha_per_joint = (alpha_baseline.unsqueeze(1) + delta_per_joint).clamp(0.0, 1.0)
+            alpha_baseline_per_joint = alpha_baseline.unsqueeze(1).expand_as(alpha_per_joint).clamp(0.0, 1.0)
+
         blended = (1 - alpha_per_joint) * action_current + alpha_per_joint * action_target
 
         # Cache intermediates for play-script inspection
@@ -224,7 +249,11 @@ class B1Phase2Env(DirectRLEnv):
         self._last_blended = blended.detach()                    # (E, 12) final blended action
 
         # --- Joint targets ---
-        joint_target = self._default_joint_pos + self.cfg.action_scale * blended
+        if self.cfg.action_space == 12:
+            # Action-space: add 12-D joint correction on top of blended output
+            joint_target = self._default_joint_pos + self.cfg.action_scale * blended + delta_a
+        else:
+            joint_target = self._default_joint_pos + self.cfg.action_scale * blended
         self._joint_target = joint_target  # cached for _apply_action
 
     def _apply_action(self) -> None:
@@ -243,7 +272,11 @@ class B1Phase2Env(DirectRLEnv):
         joint_vel = d.joint_vel                                   # (E, 12)
 
         # Phase 2 specific
-        last_action = self._last_residual                         # (E, 4)
+        if self.cfg.action_space == 12:
+            # Summarise 12-D Δa to 4-D per-leg mean so obs stays at 45-D
+            last_action = self._last_residual.reshape(self.num_envs, 4, 3).mean(dim=2)
+        else:
+            last_action = self._last_residual                     # (E, 4)
         n_gaits = len(self.cfg.gait_names)
         gait_current_oh = torch.nn.functional.one_hot(self._gait_current, num_classes=n_gaits).float()
         gait_target_oh = torch.nn.functional.one_hot(self._gait_target, num_classes=n_gaits).float()
@@ -511,6 +544,16 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2E2ERateEnvCfg",
         "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2E2ERatePPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-ActionSpace-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2ActionSpaceEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2ActionSpacePPORunnerCfg",
     },
 )
 

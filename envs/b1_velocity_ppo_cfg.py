@@ -137,3 +137,15 @@ class Phase2E2ERatePPORunnerCfg(Phase2E2EPPORunnerCfg):
     since the rate-integration structure is a new action semantics.
     """
     experiment_name = "b1_phase2_e2e_rate"
+
+
+@configclass
+class Phase2ActionSpacePPORunnerCfg(Phase2PPORunnerCfg):
+    """Ablation: action-space residual (Silver et al. RPL style, 12-D Δa).
+
+    Same backbone ([128, 128]), LR, and PPO hyperparameters as
+    Phase2PPORunnerCfg. The only difference is the action dimension (12 vs 4)
+    and experiment name. Using the same init_noise_std=0.5 so the initial
+    exploration scale is proportional.
+    """
+    experiment_name = "b1_phase2_action_space"

@@ -30,9 +30,10 @@ WIN_STEPS   = int(TRANS_S / dt) + PAD_POST
 TRANS_STEPS = int(TRANS_S / dt)
 
 METHODS = {
-    "Discrete":   ("discrete",   "#d62728"),
-    "Smoothstep": ("smoothstep", "#2ca02c"),
-    "v10 (Ours)": ("v10",        "#1f77b4"),
+    "Discrete":      ("discrete",      "#d62728"),
+    "Smoothstep":    ("smoothstep",    "#2ca02c"),
+    "Residual (α)":  ("v10",           "#1f77b4"),
+    "Residual (Δa)": ("action_space",  "#ff7f0e"),
 }
 
 
@@ -121,7 +122,8 @@ ax.set_xticklabels(labels, fontsize=11)
 ax.set_ylabel("Transition-window jerk RMS [rad/s³]", fontsize=10)
 ax.set_title(
     "Per-window jerk_TRANS across 10 seeds (60 windows each)\n"
-    "Box = IQR, whiskers = 1.5×IQR, dots = individual transition windows",
+    "Box = IQR, whiskers = 1.5×IQR, dots = individual transition windows\n"
+    "(Residual (Δa) uses fewer seeds if action_space/ CSVs not yet generated)",
     fontsize=10,
 )
 ax.grid(axis="y", alpha=0.3)

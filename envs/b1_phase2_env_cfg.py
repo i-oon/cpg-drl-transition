@@ -270,3 +270,33 @@ class B1Phase2E2ERateEnvCfg(B1Phase2EnvCfg):
     alpha_schedule: str = "e2e_rate"
     rew_residual_sparsity: float = 0.0
     rew_action_rate: float = -0.15
+
+
+@configclass
+class B1Phase2ActionSpaceEnvCfg(B1Phase2EnvCfg):
+    """Ablation: action-space residual (Silver et al. RPL style).
+
+    The MLP outputs a 12-D joint-position correction Δa added directly to
+    the smoothstep-blended joint output. This is the original Silver et al.
+    (2019) formulation where the residual corrects joint targets rather than
+    the per-leg blending weights α.
+
+    Comparing action-space vs α-space isolates whether correcting WHEN each
+    leg transitions (α-space) is better than correcting the joint positions
+    themselves (action-space), with all other design choices held fixed:
+    same smoothstep baseline, same time-gating, same sparsity weight,
+    same reward function, same PPO hyperparameters.
+
+    Δa bounded by tanh × 0.25 (symmetric), matching the base policy
+    action_scale=0.25 so the correction magnitude is commensurable with
+    the base policy outputs.
+    """
+
+    action_space: int = 12
+    # Correction magnitude cap — tanh × delta_action_max gives Δa ∈ [−0.25, +0.25],
+    # symmetric (unlike α-space's sigmoid which is asymmetric [0, 0.3]).
+    delta_action_max: float = 0.25
+    # Sparsity on |Δa|² — same weight as α-space for a fair comparison.
+    # The sum runs over 12 dims (vs 4 for α-space), but the MLP will learn
+    # proportionally smaller per-joint corrections to balance the penalty.
+    rew_residual_sparsity: float = -3.0
