@@ -1,12 +1,14 @@
 """
-Seed-robustness analysis for discrete vs smoothstep vs v10.
+Seed-robustness analysis: baselines + 2×2 ablation (space × dimension).
 
 Aggregates per-window jerk_TRANS across 10 seeds (60 windows each),
 produces a summary table and a boxplot.
 
 Usage:
     python scripts/analyze_seed_experiment.py
-    python scripts/analyze_seed_experiment.py --out logs/phase2_seed_experiment/results.png
+    python scripts/analyze_seed_experiment.py --out logs/phase2_seed_experiment/results_2x2.png
+    python scripts/analyze_seed_experiment.py --mode baselines
+    python scripts/analyze_seed_experiment.py --mode ablation
 """
 
 import argparse
@@ -20,7 +22,11 @@ import matplotlib.pyplot as plt
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--dir", default="logs/phase2_seed_experiment")
-parser.add_argument("--out", default="logs/phase2_seed_experiment/results.png")
+parser.add_argument("--out", default="logs/phase2_seed_experiment/results_2x2.png")
+parser.add_argument("--mode", default="all",
+                    choices=["all", "baselines", "ablation"],
+                    help="all=all methods, baselines=Discrete/Smoothstep/Residual-α 4D, "
+                         "ablation=2×2 factorial only")
 args = parser.parse_args()
 
 dt          = 0.02
@@ -29,12 +35,24 @@ PAD_POST    = 25
 WIN_STEPS   = int(TRANS_S / dt) + PAD_POST
 TRANS_STEPS = int(TRANS_S / dt)
 
-METHODS = {
-    "Discrete":      ("discrete",      "#d62728"),
-    "Smoothstep":    ("smoothstep",    "#2ca02c"),
-    "Residual (α)":  ("v10",           "#1f77b4"),
-    "Residual (Δa)": ("action_space",  "#ff7f0e"),
+# All methods available. Filtered below by --mode.
+ALL_METHODS = {
+    "Discrete":       ("discrete",          "#d62728"),
+    "Smoothstep":     ("smoothstep",        "#2ca02c"),
+    "Res-α 4D":       ("v10",               "#1f77b4"),
+    "Res-q 4D":       ("residual_q_4d",     "#aec7e8"),
+    "Res-α 12D":      ("residual_alpha_12d","#9467bd"),
+    "Res-q 12D":      ("action_space",      "#ff7f0e"),
 }
+
+if args.mode == "baselines":
+    METHODS = {k: v for k, v in ALL_METHODS.items()
+               if k in ("Discrete", "Smoothstep", "Res-α 4D")}
+elif args.mode == "ablation":
+    METHODS = {k: v for k, v in ALL_METHODS.items()
+               if k in ("Res-α 4D", "Res-q 4D", "Res-α 12D", "Res-q 12D")}
+else:
+    METHODS = ALL_METHODS
 
 
 def jerk_windows(path):
@@ -120,10 +138,14 @@ for i, arr in enumerate(data, start=1):
 ax.set_xticks(range(1, len(labels) + 1))
 ax.set_xticklabels(labels, fontsize=11)
 ax.set_ylabel("Transition-window jerk RMS [rad/s³]", fontsize=10)
+mode_labels = {
+    "all":       "All methods",
+    "baselines": "Baselines",
+    "ablation":  "2×2 ablation: space (α/q) × dimension (4D/12D)",
+}
 ax.set_title(
-    "Per-window jerk_TRANS across 10 seeds (60 windows each)\n"
-    "Box = IQR, whiskers = 1.5×IQR, dots = individual transition windows\n"
-    "(Residual (Δa) uses fewer seeds if action_space/ CSVs not yet generated)",
+    f"{mode_labels[args.mode]} — per-window jerk_TRANS across 10 seeds (60 windows each)\n"
+    "Box = IQR, whiskers = 1.5×IQR, dots = individual transition windows",
     fontsize=10,
 )
 ax.grid(axis="y", alpha=0.3)

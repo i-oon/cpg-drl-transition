@@ -34,7 +34,7 @@ TRANS_STEPS = int(TRANS_S / dt)
 METHODS = {
     "Discrete":   (f"logs/phase2_seed_experiment/discrete/playback_s{args.seed}.csv",   "#d62728", 2.0),
     "Smoothstep": (f"logs/phase2_seed_experiment/smoothstep/playback_s{args.seed}.csv", "#2ca02c", 1.8),
-    "v10 (Ours)": (f"logs/phase2_seed_experiment/v10/playback_s{args.seed}.csv",        "#1f77b4", 1.8),
+    "Residual-α": (f"logs/phase2_seed_experiment/v10/playback_s{args.seed}.csv",        "#1f77b4", 1.8),
 }
 
 

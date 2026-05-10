@@ -141,11 +141,25 @@ class Phase2E2ERatePPORunnerCfg(Phase2E2EPPORunnerCfg):
 
 @configclass
 class Phase2ActionSpacePPORunnerCfg(Phase2PPORunnerCfg):
-    """Ablation: action-space residual (Silver et al. RPL style, 12-D Δa).
+    """Residual-q 12D — joint-position correction, per-joint (Silver et al.)."""
+    experiment_name = "b1_phase2_residual_q_12d"
 
-    Same backbone ([128, 128]), LR, and PPO hyperparameters as
-    Phase2PPORunnerCfg. The only difference is the action dimension (12 vs 4)
-    and experiment name. Using the same init_noise_std=0.5 so the initial
-    exploration scale is proportional.
+
+@configclass
+class Phase2Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
+    """Residual-q 4D — joint-position correction, per-leg scalar.
+
+    Same backbone and hyperparameters as Phase2PPORunnerCfg (4-D output).
+    Dimension matches Residual-α 4D for a fair space-controlled comparison.
     """
-    experiment_name = "b1_phase2_action_space"
+    experiment_name = "b1_phase2_residual_q_4d"
+
+
+@configclass
+class Phase2Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
+    """Residual-α 12D — blending-weight correction, per-joint.
+
+    Same backbone and hyperparameters as Phase2PPORunnerCfg (12-D output).
+    Dimension matches Residual-q 12D for a fair space-controlled comparison.
+    """
+    experiment_name = "b1_phase2_residual_alpha_12d"

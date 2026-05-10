@@ -78,6 +78,11 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     (bounded by tanh × 0.2 inside the env).
     """
 
+    # --- Residual mode ---
+    # "alpha": MLP corrects blending weights (when each leg transitions)
+    # "joint": MLP corrects joint positions directly (Silver et al. RPL style)
+    residual_mode: str = "alpha"
+
     # --- DirectRLEnvCfg required fields ---
     decimation: int = 4                      # 50 Hz control (sim 200 Hz)
     episode_length_s: float = 10.0           # 500 control steps per episode
@@ -274,29 +279,56 @@ class B1Phase2E2ERateEnvCfg(B1Phase2EnvCfg):
 
 @configclass
 class B1Phase2ActionSpaceEnvCfg(B1Phase2EnvCfg):
-    """Ablation: action-space residual (Silver et al. RPL style).
+    """Residual-q 12D — joint-position correction, per-joint (Silver et al. RPL).
 
-    The MLP outputs a 12-D joint-position correction Δa added directly to
-    the smoothstep-blended joint output. This is the original Silver et al.
-    (2019) formulation where the residual corrects joint targets rather than
-    the per-leg blending weights α.
+    MLP outputs 12-D Δq added directly to the smoothstep-blended joint output.
+    residual_mode="joint", action_space=12.
 
-    Comparing action-space vs α-space isolates whether correcting WHEN each
-    leg transitions (α-space) is better than correcting the joint positions
-    themselves (action-space), with all other design choices held fixed:
-    same smoothstep baseline, same time-gating, same sparsity weight,
-    same reward function, same PPO hyperparameters.
-
-    Δa bounded by tanh × 0.25 (symmetric), matching the base policy
-    action_scale=0.25 so the correction magnitude is commensurable with
-    the base policy outputs.
+    Part of the 2×2 ablation (space × dimension):
+      Residual-α 4D  |  Residual-q 4D
+      Residual-α 12D |  Residual-q 12D  ← this config
     """
 
+    residual_mode: str = "joint"
     action_space: int = 12
-    # Correction magnitude cap — tanh × delta_action_max gives Δa ∈ [−0.25, +0.25],
-    # symmetric (unlike α-space's sigmoid which is asymmetric [0, 0.3]).
     delta_action_max: float = 0.25
-    # Sparsity on |Δa|² — same weight as α-space for a fair comparison.
-    # The sum runs over 12 dims (vs 4 for α-space), but the MLP will learn
-    # proportionally smaller per-joint corrections to balance the penalty.
     rew_residual_sparsity: float = -3.0
+
+
+@configclass
+class B1Phase2Joint4DEnvCfg(B1Phase2EnvCfg):
+    """Residual-q 4D — joint-position correction, per-leg scalar.
+
+    MLP outputs 4-D Δq (one scalar per leg), broadcast uniformly to all 3
+    joints of that leg. This matches Residual-α 4D's dimension exactly while
+    changing the output space from α (blending weight) to q (joint position).
+
+    Part of the 2×2 ablation (space × dimension):
+      Residual-α 4D  |  Residual-q 4D  ← this config
+      Residual-α 12D |  Residual-q 12D
+    """
+
+    residual_mode: str = "joint"
+    action_space: int = 4
+    delta_action_max: float = 0.25
+    rew_residual_sparsity: float = -3.0
+
+
+@configclass
+class B1Phase2Alpha12DEnvCfg(B1Phase2EnvCfg):
+    """Residual-α 12D — blending-weight correction, per-joint.
+
+    MLP outputs 12-D Δα (one per joint), each clamped via sigmoid to [0, 0.3].
+    Every joint gets its own independent α correction rather than sharing one
+    per leg. This matches Residual-q 12D's dimension exactly while keeping
+    the output space as α (blending weight).
+
+    Part of the 2×2 ablation (space × dimension):
+      Residual-α 4D  |  Residual-q 4D
+      Residual-α 12D |  Residual-q 12D  ← this config
+                ↑ this config
+    """
+
+    residual_mode: str = "alpha"
+    action_space: int = 12
+    # delta_alpha_max inherited (0.3) — same sigmoid bound as 4D variant

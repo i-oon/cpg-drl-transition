@@ -80,10 +80,12 @@ import envs.b1_phase2_env  # noqa: F401
 from envs.b1_phase2_env_cfg import (
     B1Phase2EnvCfg, B1Phase2E2EEnvCfg,
     B1Phase2Residual1DEnvCfg, B1Phase2E2ERateEnvCfg,
+    B1Phase2ActionSpaceEnvCfg, B1Phase2Joint4DEnvCfg, B1Phase2Alpha12DEnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import (
     Phase2PPORunnerCfg, Phase2E2EPPORunnerCfg,
     Phase2Residual1DPPORunnerCfg, Phase2E2ERatePPORunnerCfg,
+    Phase2ActionSpacePPORunnerCfg, Phase2Joint4DPPORunnerCfg, Phase2Alpha12DPPORunnerCfg,
 )
 from isaaclab.envs.common import ViewerCfg
 
@@ -95,9 +97,12 @@ from rsl_rl.runners import OnPolicyRunner
 # ---------------------------------------------------------------------------
 
 _task_cfg_map = {
-    "Isaac-B1-Phase2-E2E-v0":        (Phase2E2EPPORunnerCfg,      B1Phase2E2EEnvCfg),
-    "Isaac-B1-Phase2-Residual1D-v0": (Phase2Residual1DPPORunnerCfg, B1Phase2Residual1DEnvCfg),
-    "Isaac-B1-Phase2-E2E-Rate-v0":   (Phase2E2ERatePPORunnerCfg,   B1Phase2E2ERateEnvCfg),
+    "Isaac-B1-Phase2-E2E-v0":         (Phase2E2EPPORunnerCfg,        B1Phase2E2EEnvCfg),
+    "Isaac-B1-Phase2-Residual1D-v0":  (Phase2Residual1DPPORunnerCfg, B1Phase2Residual1DEnvCfg),
+    "Isaac-B1-Phase2-E2E-Rate-v0":    (Phase2E2ERatePPORunnerCfg,    B1Phase2E2ERateEnvCfg),
+    "Isaac-B1-Phase2-ActionSpace-v0": (Phase2ActionSpacePPORunnerCfg, B1Phase2ActionSpaceEnvCfg),
+    "Isaac-B1-Phase2-Joint4D-v0":     (Phase2Joint4DPPORunnerCfg,    B1Phase2Joint4DEnvCfg),
+    "Isaac-B1-Phase2-Alpha12D-v0":    (Phase2Alpha12DPPORunnerCfg,   B1Phase2Alpha12DEnvCfg),
 }
 _runner_cls, _env_cls = _task_cfg_map.get(
     args.task, (Phase2PPORunnerCfg, B1Phase2EnvCfg)
