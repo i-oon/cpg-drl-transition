@@ -52,20 +52,20 @@ DT = 0.02
 
 # (label, path, color, linestyle, linewidth)
 BASELINES = [
-    ("Discrete Switch",   "logs/phase2/baselines/discrete/playback.csv",       "#d62728", "--", 2.0),
-    ("Linear ramp",       "logs/phase2/baselines/linear_ramp/playback.csv",    "#8c564b", "-.", 1.8),
-    ("Smoothstep",        "logs/phase2/baselines/smoothstep_ramp/playback.csv","#2ca02c", "-",  1.8),
-    ("Residual-α 4D (Ours)", "logs/phase2/phase2_v10/playback.csv",            "#1f77b4", "-",  2.2),
+    ("Discrete Switch",  "logs/phase2/baselines/discrete/playback_seed42.csv",       "#d62728", "--", 2.0),
+    ("Linear ramp",      "logs/phase2/baselines/linear_ramp/playback_seed42.csv",    "#8c564b", "-.", 1.8),
+    ("Smoothstep",       "logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv","#2ca02c", "-",  1.8),
+    ("Residual-α 12D",   "logs/phase2/residual_alpha_12d/playback_seed42.csv",       "#1f77b4", "-",  2.2),
 ]
 E2E_ENTRY = \
-    ("E2E",              "logs/phase2/baselines/e2e/playback.csv",             "#9467bd", ":",  1.8)
+    ("E2E",             "logs/phase2/baselines/e2e/playback_seed42.csv",             "#9467bd", ":",  1.8)
 
-# Ablation uses seed-0 CSVs so all four variants come from the same run conditions
+# Ablation uses canonical seed=42 playback CSVs
 ABLATION = [
-    ("Res-α 4D (Ours)", "logs/phase2_seed_experiment/v10/playback_s0.csv",               "#1f77b4", "-",  2.2),
-    ("Res-α 12D",       "logs/phase2_seed_experiment/residual_alpha_12d/playback_s0.csv", "#1f77b4", "--", 1.8),
-    ("Res-q 4D",        "logs/phase2_seed_experiment/residual_q_4d/playback_s0.csv",      "#ff7f0e", "-",  1.8),
-    ("Res-q 12D",       "logs/phase2_seed_experiment/action_space/playback_s0.csv",       "#ff7f0e", "--", 1.6),
+    ("Res-α 4D",  "logs/phase2/phase2_v10/playback_seed42.csv",         "#1f77b4", "-",  1.8),
+    ("Res-α 12D", "logs/phase2/residual_alpha_12d/playback_seed42.csv", "#1f77b4", "--", 2.2),
+    ("Res-q 4D",  "logs/phase2/residual_q_4d/playback_seed42.csv",      "#ff7f0e", "-",  1.8),
+    ("Res-q 12D", "logs/phase2/residual_q_12d/playback_seed42.csv",     "#ff7f0e", "--", 1.6),
 ]
 
 if args.mode == "baselines":
@@ -199,7 +199,7 @@ if args.mode == "baselines" and "Discrete Switch" in datasets:
     peak_val = disc["jv_max"][mask_n].max()
     peak_t_rel = disc["t"][mask_n][np.argmax(disc["jv_max"][mask_n])] - ts
 
-    ours_label = "Residual-α 4D (Ours)"
+    ours_label = "Residual-α 12D"
     ours_peak  = peaks.get(ours_label, 1.0)
     if ours_peak > 0:
         ratio = peak_val / ours_peak
@@ -224,7 +224,7 @@ axes[3].legend(handles=legend_patches, loc="lower right", fontsize=8.5,
 if args.mode == "ablation":
     axes[0].text(0.01, 0.05,
                  "Blue = α-space  |  Orange = q-space\n"
-                 "Solid = 4D  |  Dashed = 12D",
+                 "Solid = 4D  |  Dashed = 12D  (best: Res-α 12D)",
                  transform=axes[0].transAxes, fontsize=8,
                  va="bottom", color="0.35",
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.8", alpha=0.85))

@@ -1,5 +1,5 @@
 """
-Overlay body-acceleration comparison: discrete switching vs residual learning (v10).
+Overlay body-acceleration comparison: discrete switching vs Residual-α 12D.
 
 Reads two CSVs, computes body forward + vertical acceleration from vx/vz columns
 (vx is in CSV; vz is not — we use a rolling derivative of vx as the forward accel signal),
@@ -20,8 +20,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--csv_v10",      default="logs/phase2/phase2_v10/playback.csv")
-parser.add_argument("--csv_discrete", default="logs/phase2/baselines/discrete/playback.csv")
+parser.add_argument("--csv_v10",      default="logs/phase2/residual_alpha_12d/playback_seed42.csv")
+parser.add_argument("--csv_discrete", default="logs/phase2/baselines/discrete/playback_seed42.csv")
 parser.add_argument("--out",          default="logs/phase2/compare_body_acc.png")
 parser.add_argument("--smooth",       type=int, default=5,
                     help="Rolling-window half-width for display smoothing (steps). 0=off.")
@@ -91,7 +91,7 @@ fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True,
                          gridspec_kw={"height_ratios": [2, 1]})
 
 COLORS = {
-    "v10":     ("#1f77b4", "Residual v10"),
+    "v10":      ("#1f77b4", "Residual-α 12D"),
     "discrete": ("#d62728", "Discrete switch"),
 }
 
@@ -117,8 +117,8 @@ ax0.grid(alpha=0.25)
 # Bottom: rolling RMS — single interpretable line per method
 ax1 = axes[1]
 _shade(ax1)
-ax1.plot(t, rms_v10,  lw=1.4, c=COLORS["v10"][0],      label=f"v10  RMS = {np.mean(rms_v10):.3f}")
-ax1.plot(t, rms_disc, lw=1.4, c=COLORS["discrete"][0], label=f"disc RMS = {np.mean(rms_disc):.3f}")
+ax1.plot(t, rms_v10,  lw=1.4, c=COLORS["v10"][0],      label=f"Res-α 12D  RMS = {np.mean(rms_v10):.3f}")
+ax1.plot(t, rms_disc, lw=1.4, c=COLORS["discrete"][0], label=f"Discrete  RMS = {np.mean(rms_disc):.3f}")
 ax1.set_ylabel(f"|ax| rolling RMS\n({win}-step ≈ {win*dt:.1f} s)", fontsize=10)
 ax1.set_xlabel("time [s]", fontsize=10)
 ax1.legend(loc="upper right", fontsize=9)
@@ -139,7 +139,7 @@ for seg_t, (cur, tgt) in unique_pairs:
              f"{cur[:3]}→{tgt[:3]}", fontsize=6.5, color="dimgray", rotation=90, va="top")
 
 fig.suptitle(
-    "Body forward acceleration — Discrete switching vs Residual learning (v10)\n"
+    "Body forward acceleration — Discrete switching vs Residual-α 12D\n"
     "blue=src-hold  purple=transition window  orange=tgt-hold  |  "
     f"smoothing window={w} steps",
     fontsize=10,

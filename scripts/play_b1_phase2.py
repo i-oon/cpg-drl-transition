@@ -74,6 +74,8 @@ import torch
 
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 import isaaclab_tasks  # noqa: F401
 import envs.b1_phase2_env  # noqa: F401
@@ -740,9 +742,11 @@ if args.save_csv:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="") as f:
         w = csv.writer(f)
-        header = (["t", "current", "target", "vx", "h", "tilt", "alpha_base",
-                   "dFL", "dFR", "dRL", "dRR",
-                   "power_W", "x_w"]
+        n_delta = delta_a.shape[1]   # 1, 4, or 12 depending on action_space
+        delta_cols = [f"d{i}" for i in range(n_delta)]
+        header = (["t", "current", "target", "vx", "h", "tilt", "alpha_base"]
+                  + delta_cols
+                  + ["power_W", "x_w"]
                   + [f"jp{i}" for i in range(12)]
                   + [f"jv{i}" for i in range(12)]
                   + [f"ja{i}" for i in range(12)]

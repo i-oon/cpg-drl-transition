@@ -38,11 +38,11 @@ WIN_STEPS    = int(TRANS_S / dt) + PAD_POST   # 175 steps total
 TRANS_STEPS  = int(TRANS_S / dt)              # 150 steps = 3 s
 
 RUNS = {
-    "Discrete switch":    ("logs/phase2/baselines/discrete/playback.csv",       "#d62728", 0.85),
-    "Linear ramp":        ("logs/phase2/baselines/linear_ramp/playback.csv",    "#ff7f0e", 0.75),
-    "Smoothstep ramp":    ("logs/phase2/baselines/smoothstep_ramp/playback.csv","#2ca02c", 0.75),
-    "Residual 1-D (abl)": ("logs/phase2/residual1d_v1/playback.csv",            "#9467bd", 0.75),
-    "Residual v10":       ("logs/phase2/phase2_v10/playback.csv",                "#1f77b4", 0.85),
+    "Discrete switch":  ("logs/phase2/baselines/discrete/playback_seed42.csv",        "#d62728", 0.85),
+    "Linear ramp":      ("logs/phase2/baselines/linear_ramp/playback_seed42.csv",     "#ff7f0e", 0.75),
+    "Smoothstep ramp":  ("logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv", "#2ca02c", 0.75),
+    "Residual-α 4D":    ("logs/phase2/phase2_v10/playback_seed42.csv",                "#aec7e8", 0.75),
+    "Residual-α 12D":   ("logs/phase2/residual_alpha_12d/playback_seed42.csv",        "#1f77b4", 0.90),
 }
 
 # ---------------------------------------------------------------------------
@@ -154,8 +154,8 @@ if summary_rms:
         ax_rms.text(val + 80, bar.get_y() + bar.get_height() / 2,
                     f"{val:.0f}", va="center", fontsize=8.5)
     ax_rms.set_xlim(0, max(vals) * 1.18)
-    if "Residual v10" in summary_rms:
-        idx = labels_sorted.index("Residual v10")
+    if "Residual-α 12D" in summary_rms:
+        idx = labels_sorted.index("Residual-α 12D")
         bars[idx].set_edgecolor("black")
         bars[idx].set_linewidth(2.0)
 
