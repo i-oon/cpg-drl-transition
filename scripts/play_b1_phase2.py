@@ -57,6 +57,11 @@ parser.add_argument("--cam_lookat", type=str, default="0.0,0.0,0.5",
                     help="Camera lookat offset from tracked robot (x,y,z) [m].")
 parser.add_argument("--seed", type=int, default=42,
                     help="RNG seed for env domain randomization. Fix across baselines for fair comparison.")
+parser.add_argument("--randomize_start", action="store_true",
+                    help="Sample transition_start_s from the training range [transition_start_min_s, "
+                         "transition_start_max_s] at each gait switch instead of pinning to 2.0 s. "
+                         "Uses the seeded numpy RNG so results are reproducible per seed. "
+                         "Enables genuine cross-seed variation in gait-phase at switch time.")
 args = parser.parse_args()
 
 # Video implies headless cameras
@@ -235,6 +240,25 @@ joint_acc_hist = []           # (T, 12)
 torque_hist = []              # (T, 12)
 power_inst_hist = []          # (T,) Σ|τ·q̇|
 x_pos_hist = []               # (T,) world x for distance integration
+_rng = np.random.default_rng(args.seed)   # isolated RNG — immune to IsaacLab's internal np.random reseeding
+
+def _sample_transition_start() -> float:
+    """Return transition start time in seconds.
+
+    Default: 2.0 s (canonical, pinned — all methods comparable).
+    With --randomize_start: sample from training distribution
+    [transition_start_min_s, transition_start_max_s] using an isolated
+    numpy Generator seeded at args.seed. Immune to IsaacLab's internal
+    np.random.seed() calls that reset the global RNG during env init.
+    Different --seed values produce different gait phases at switch time,
+    enabling genuine cross-seed robustness evaluation.
+    """
+    if args.randomize_start:
+        lo = env_cfg.transition_start_min_s
+        hi = env_cfg.transition_start_max_s
+        return float(_rng.uniform(lo, hi))
+    return 2.0
+
 switch_step_marks = []        # control-step indices when a switch fired
 contact_hist = []             # (T, 4) bool — FL FR RL RR stance/swing
 action_current_hist = []     # (T, 12) π_current raw output
@@ -262,11 +286,12 @@ def _set_gait_pair(env, current_name, target_name):
 current_name = gait_seq[0]
 target_name = gait_seq[1] if len(gait_seq) > 1 else gait_seq[0]
 _set_gait_pair(env, current_name, target_name)
-# Initialise α clock consistently so segment 1 also has a 2 s source hold.
-# _reset_idx() at env init randomises _transition_start_s to [1.5, 3.5];
-# overwrite here so all three methods start from the same baseline.
+# Initialise α clock. Default: pin to 2.0 s for cross-method comparability.
+# With --randomize_start: sample from training range [1.5, 3.5] so different
+# seeds produce different gait phases at switch time.
+_current_hold_s = _sample_transition_start()   # source-hold duration for this segment
 env.unwrapped.episode_length_buf[:] = 0
-env.unwrapped._transition_start_s[:] = 2.0
+env.unwrapped._transition_start_s[:] = _current_hold_s
 
 for step in range(args.steps):
     # Switch gait pair every switch_interval_s
@@ -275,21 +300,17 @@ for step in range(args.steps):
         current_name = target_name
         target_name = gait_seq[(seq_idx + 1) % len(gait_seq)]
         _set_gait_pair(env, current_name, target_name)
-        # Reset α clock and pin transition_start_s to a fixed 2 s so the
-        # source gait is always visible for 2 s before the ramp begins,
-        # regardless of what _reset_idx may have randomised it to.
+        _current_hold_s = _sample_transition_start()
         env.unwrapped.episode_length_buf[:] = 0
-        env.unwrapped._transition_start_s[:] = 2.0
+        env.unwrapped._transition_start_s[:] = _current_hold_s
         switch_step_marks.append(step)
 
-    # Discrete baseline: hold source for 2 s per segment, then instant α jump.
-    # Controlled via _transition_start_s (not episode_length_buf) because
-    # _pre_physics_step runs BEFORE episode_length_buf is incremented (line 335
-    # vs 360 in direct_rl_env.py), so buf manipulation gets seen one step late.
+    # Discrete baseline: hold source for _current_hold_s, then instant α jump.
+    # _current_hold_s = 2.0 s (canonical) or sampled from [1.5, 3.5] (--randomize_start).
     # Setting _transition_start_s to ±1e6 forces ramp_progress << 0 (α=0) or
     # >> 1 (α=1) regardless of episode_length_buf value.
     if args.baseline == "discrete":
-        _transition_start_steps = int(2.0 / control_dt)   # 100 steps = 2.0 s
+        _transition_start_steps = int(_current_hold_s / control_dt)
         steps_since_switch = (step if len(switch_step_marks) == 0
                               else step - switch_step_marks[-1])
         if steps_since_switch >= _transition_start_steps:
@@ -354,7 +375,7 @@ for step in range(args.steps):
                                else step)
         env.unwrapped._gait_current[:] = gait_names.index(current_name)
         env.unwrapped._gait_target[:] = gait_names.index(target_name)
-        env.unwrapped._transition_start_s[:] = 2.0
+        env.unwrapped._transition_start_s[:] = _current_hold_s   # reuse current segment's hold
         env.unwrapped.episode_length_buf[:] = _steps_since_switch
 
     if (step + 1) % 50 == 0:
