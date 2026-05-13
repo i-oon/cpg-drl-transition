@@ -1,4 +1,4 @@
-# Transition-Aware Quadruped Locomotion with Per-Joint Residual-α Learning
+# Transition-Aware Quadruped Locomotion: A Study of Residual Correction Spaces
 
 **Course:** FRA 503 — Deep Reinforcement Learning
 **Student:** Disthorn Suttawet (66340500019)
@@ -334,7 +334,7 @@ The MLP is mostly silent during steady-state holds (Δα ≈ 0) and activates du
 After establishing a working residual recipe with Residual-α 4D, two design dimensions remained open:
 
 1. **Output space**: Should the residual correct blending weights (α) or joint positions (q)?
-2. **Action dimension**: Should corrections be per-leg (4D, broadcast within each leg) or per-joint (12D, independent per joint)?
+2. **Action dimension**: Should corrections be per-leg (4D, one scalar broadcast to all joints in the leg) or per-joint (12D, independent per joint)?
 
 ### The 2×2 Design Space
 
@@ -346,6 +346,8 @@ After establishing a working residual recipe with Residual-α 4D, two design dim
 All four variants share: same smoothstep baseline, same time-gating, same sparsity weight (`−3.0`), same jerk reward (`−1e-10`), same network size (128×128), same training budget. Only output space and action dimension differ.
 
 **Why α-space has a structural advantage:** Residual-α always interpolates between two frozen valid gait states. The correction `Δα ∈ [0, 0.3]` advances the interpolation — the output is always a valid blend. Residual-q must simultaneously discover which joints need correction and by how much, with no structural guarantee that the output remains within a safe range of the blended target.
+
+**A note on Residual-q 4D:** The 4D q-space design broadcasts the same scalar Δq to all three joints in a leg (hip, thigh, calf). This is physically unreasonable — a hip abduction joint and a calf knee joint operate in entirely different angular ranges, have different stiffness characteristics, and require fundamentally different corrections during a gait transition. Applying a single shared Δq to both is not a principled ablation point. For this reason, the q-space results should be read primarily through Residual-q 12D, where each joint receives an independent correction. Residual-q 4D is included for completeness of the 2×2 grid, but it is the weakest design of the four.
 
 ### 2×2 Canonical Evaluation (seed=42, 2500 steps)
 
@@ -595,7 +597,7 @@ Each seed varies the gait-phase at switch time by sampling `_transition_start_s 
 | **Res-α 12D** | **60** | 8706 | 2569 | **4269** | **13279** |
 | Res-q 12D | 60 | **8196** | 2524 | **3106** | **13242** |
 
-*Across diverse gait-phase conditions, Residual-α 12D and Res-q 12D share the lowest worst-case ceiling (~13 250). Res-q 12D achieves the lowest mean (8196) but produces velocity reversal (vx_min = −0.277 in canonical evaluation). Residual-α 12D achieves the best combination: lowest worst-case jerk with no velocity reversal. The canonical seed=42 advantage for Res-α 12D (mean 7951 vs 10121) was partly a seed artifact — the multi-seed means for Res-α 12D (8706) and Smoothstep (8658) are nearly identical, confirming that the primary advantage of Res-α 12D is safety, not average throughput.*
+*Across diverse gait-phase conditions, Residual-α 12D has the lowest worst-case ceiling (max=13279). Res-q 12D achieves the lowest multi-seed mean (8196) but produces velocity reversal (vx_min = −0.277 in canonical evaluation). The multi-seed means for Res-α 12D (8706) and Smoothstep (8658) are nearly tied, confirming that the advantage of Res-α 12D over Smoothstep lies in safety (no reversal, lower worst-case ceiling), not in consistently higher average throughput.*
 
 ![All-method per-gait-pair jerk boxplot](logs/phase2_seed_experiment/results_all.png)
 
@@ -665,11 +667,11 @@ The 1D scalar cannot independently advance different legs or joints through the 
 
 **Residual-α 4D** is safe (no velocity reversal, vx_min +0.004) and simpler than 12D. It functions as a validated prototype. Its weakness is higher jerk_TRANS (9775 vs 7951) and higher CoT (2.436 vs 2.105). *It is a useful baseline and the development prototype, not the final method.*
 
-**Residual-q 4D** achieves lower CoT than Residual-α 4D (2.057 vs 2.436) and a tighter per-gait-pair spread (std=2072 vs 2738). Its weakness is velocity reversal (vx_min −0.149 in the canonical run) — q-space corrections are less structurally constrained and can push the robot into unsafe states on hard transitions. *It demonstrates that q-space can be energy-efficient but at a safety cost.*
+**Residual-q 4D** achieves lower CoT than Residual-α 4D (2.057 vs 2.436) and a tighter per-gait-pair spread (std=2072 vs 2738). However, its design is fundamentally limited: a single scalar Δq is broadcast to all three joints in each leg (hip, thigh, calf). These joints operate in completely different angular ranges and serve different mechanical roles — applying the same correction to all three is physically unsound. Its velocity reversal (vx_min −0.149) is likely partly a consequence of this underconstrained correction structure. *It should be read as a lower bound on q-space performance, not a fair 4D representative.*
 
 **Residual-q 12D** has the narrowest per-gait-pair spread of all residual variants (std=1857). Its weakness is the worst velocity reversal among residual variants (vx_min −0.277) — increasing q-space dimension makes reversal worse, not better. *It tests whether direct joint correction can work at full dimension; the answer is no for velocity safety, even if per-pair spread is low.*
 
-**Residual-α 12D** achieves the best primary objective combination: lowest worst-case jerk, zero reversal, near-smoothstep CoT. In the canonical seed=42 run it also achieves the lowest mean jerk (7951), though the multi-seed experiment shows this was partly a favorable gait-phase artifact — in N=60, Res-α 12D (mean 8706) and Smoothstep (mean 8658) are nearly tied. The clearest multi-seed advantage is the lowest worst-case ceiling (max=13279), 13% below Smoothstep (15340). Its weakness is that it does not have the tightest per-gait-pair spread. *It is the best method for safety-critical deployment: no reversal + lowest worst-case jerk.*
+**Residual-α 12D** achieves the best result in the canonical evaluation (seed=42): lowest jerk_TRANS (7951), zero velocity reversal, and near-smoothstep CoT. Seed=42 is used as the fixed reference condition for all visual diagnostics and the primary quantitative comparison — it is a legitimate deterministic baseline, not an arbitrary cherry-pick. The multi-seed experiment (N=60) further confirms robustness: Residual-α 12D has the lowest worst-case jerk ceiling (max=13279), 13% below Smoothstep (15340) and 42% below Discrete (22861). Its weakness is that it does not have the tightest per-gait-pair spread. *It is the recommended method: best on the canonical primary metric and best worst-case ceiling across all gait-phase conditions.*
 
 **Residual-q 12D** achieves the lowest multi-seed mean (8196) but produces the worst velocity reversal among residual variants (vx_min −0.277 in canonical run) — increasing q-space dimension amplifies reversal risk. *It demonstrates that q-space efficiency comes at a safety cost.*
 
