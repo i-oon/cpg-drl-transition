@@ -1,26 +1,51 @@
 """
 Per-gait-pair jerk analysis: baselines + 2×2 ablation (space × dimension).
 
-Reads each method's canonical seed=42 playback CSV and computes jerk_TRANS
-for each of the 6 directed gait-pair transitions.
+Supports two evaluation modes selected via --source:
 
-NOTE ON EVALUATION SCOPE
-─────────────────────────
-The seed experiment (playback_s0..s9) was run with 10 environment seeds, but
-investigation showed that env_cfg.seed does not vary jerk_TRANS:
-  • Transition timing is pinned to 2.0 s in play_b1_phase2.py (_transition_start_s = 2.0).
-  • Domain randomization (friction, mass) does not alter gait-phase at switch time.
-  • All 10 per-seed CSVs are therefore identical — they represent the same
-    canonical deterministic run repeated.
+──────────────────────────────────────────────────────────────────────────────
+--source canonical  (default)  N=6 per method
+──────────────────────────────────────────────────────────────────────────────
+Reads each method's canonical seed=42 playback CSV (playback_seed42.csv).
+Computes jerk_TRANS for each of the 6 directed gait-pair transitions in that
+single episode. N=6 per method.
 
-Correct framing: this is a 6-gait-pair analysis (N=6 per method), not a
-60-window multi-seed robustness evaluation. The per-gait-pair breakdown
-reveals which gait-pair transitions are structurally hard vs easy.
+Use this for:
+  • Primary quantitative comparison table.
+  • Per-gait-pair difficulty hierarchy (which pairs are structurally hard).
+  • Visual diagnostics (gait diagrams, zoom plots) — all generated from this run.
 
+Note: _transition_start_s is pinned to 2.0 s in canonical mode (no
+--randomize_start). All methods see the same fixed gait-phase at switch time.
+
+──────────────────────────────────────────────────────────────────────────────
+--source seeds                 N=60 per method
+──────────────────────────────────────────────────────────────────────────────
+Reads 10 seed CSVs per method (playback_s0.csv … playback_s9.csv) from
+logs/phase2_seed_experiment/{folder}/. Each seed samples _transition_start_s
+~ Uniform(1.5, 3.5) s via --randomize_start, hitting the switch at a different
+gait phase. 10 seeds × 6 gait pairs = N=60 transition windows per method.
+
+Requires: bash scripts/run_seed_experiment.sh to have been run first.
+
+Important fix applied to make seeds valid:
+  • IsaacLab resets numpy's global RNG during env init, overriding
+    np.random.seed(). Fixed by using np.random.default_rng(seed) — an
+    isolated Generator immune to external np.random.seed() calls.
+  • The discrete baseline had _transition_start_steps hardcoded to
+    int(2.0/dt), ignoring --randomize_start. Fixed using _current_hold_s.
+
+Use this for:
+  • Multi-seed robustness evaluation (worst-case ceiling, spread across
+    diverse gait-phase conditions at switch time).
+
+──────────────────────────────────────────────────────────────────────────────
 Usage:
     python scripts/analyze_seed_experiment.py
     python scripts/analyze_seed_experiment.py --mode baselines
     python scripts/analyze_seed_experiment.py --mode ablation
+    python scripts/analyze_seed_experiment.py --source seeds --mode all
+──────────────────────────────────────────────────────────────────────────────
 """
 
 import argparse
@@ -56,12 +81,12 @@ TRANS_STEPS = int(TRANS_S / dt)
 
 # Method definitions: (canonical_csv, seed_experiment_folder, color)
 ALL_METHODS_DEF = {
-    "Discrete":   ("logs/phase2/baselines/discrete/playback_seed42.csv",        "discrete",          "#d62728"),
-    "Smoothstep": ("logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv", "smoothstep",        "#2ca02c"),
-    "Res-α 4D":   ("logs/phase2/phase2_v10/playback_seed42.csv",                "v10",               "#1f77b4"),
-    "Res-q 4D":   ("logs/phase2/residual_q_4d/playback_seed42.csv",             "residual_q_4d",     "#aec7e8"),
-    "Res-α 12D":  ("logs/phase2/residual_alpha_12d/playback_seed42.csv",        "residual_alpha_12d","#9467bd"),
-    "Res-q 12D":  ("logs/phase2/residual_q_12d/playback_seed42.csv",            "action_space",      "#ff7f0e"),
+    "Discrete":   ("logs/phase2/baselines/discrete/playback_seed42.csv",                "discrete",                  "#d62728"),
+    "Smoothstep": ("logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv",         "smoothstep",                "#2ca02c"),
+    "Res-α 4D":   ("logs/phase2/residual_alpha_4d_sp05_jw2/playback_seed42.csv",        "residual_alpha_4d_sp05_jw2","#1f77b4"),
+    "Res-q 4D":   ("logs/phase2/residual_q_4d_sp05_jw2/playback_seed42.csv",            "residual_q_4d_sp05_jw2",    "#aec7e8"),
+    "Res-α 12D":  ("logs/phase2/residual_alpha_12d/playback_seed42.csv",                "residual_alpha_12d",        "#9467bd"),
+    "Res-q 12D":  ("logs/phase2/residual_q_12d_sp05_jw2/playback_seed42.csv",           "residual_q_12d_sp05_jw2",   "#ff7f0e"),
 }
 
 if args.mode == "baselines":

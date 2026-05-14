@@ -62,10 +62,10 @@ E2E_ENTRY = \
 
 # Ablation uses canonical seed=42 playback CSVs
 ABLATION = [
-    ("Res-α 4D",  "logs/phase2/phase2_v10/playback_seed42.csv",         "#1f77b4", "-",  1.8),
-    ("Res-α 12D", "logs/phase2/residual_alpha_12d/playback_seed42.csv", "#1f77b4", "--", 2.2),
-    ("Res-q 4D",  "logs/phase2/residual_q_4d/playback_seed42.csv",      "#ff7f0e", "-",  1.8),
-    ("Res-q 12D", "logs/phase2/residual_q_12d/playback_seed42.csv",     "#ff7f0e", "--", 1.6),
+    ("Res-α 4D",  "logs/phase2/residual_alpha_4d_sp05_jw2/playback_seed42.csv", "#1f77b4", "-",  1.8),
+    ("Res-α 12D", "logs/phase2/residual_alpha_12d/playback_seed42.csv",         "#1f77b4", "--", 2.2),
+    ("Res-q 4D",  "logs/phase2/residual_q_4d_sp05_jw2/playback_seed42.csv",     "#ff7f0e", "-",  1.8),
+    ("Res-q 12D", "logs/phase2/residual_q_12d_sp05_jw2/playback_seed42.csv",    "#ff7f0e", "--", 1.6),
 ]
 
 if args.mode == "baselines":

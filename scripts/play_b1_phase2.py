@@ -180,17 +180,21 @@ env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 # Load policy  (skipped for no-training baselines)
 # ---------------------------------------------------------------------------
 
-if args.baseline is not None:
-    # No-training baseline: send zeros as actions → Δα=0 (tanh(0)=0)
+if args.baseline is not None and args.checkpoint is None:
+    # Pure no-training baseline: send large-negative actions → sigmoid(-100)≈0 → Δα≈0
+    # NOTE: torch.zeros() would give sigmoid(0)=0.5 → Δα=0.15 constant, corrupting baselines.
     _n_actions = env.num_actions
     _device    = agent_cfg.device
-    policy = lambda obs: torch.zeros(obs.shape[0], _n_actions, device=_device)
-    print(f"  [baseline={args.baseline}] No checkpoint loaded — using zero actions (Δα≡0).")
+    policy = lambda obs: torch.full((obs.shape[0], _n_actions), -100.0, device=_device)
+    print(f"  [baseline={args.baseline}] No checkpoint loaded — using Δα≡0 actions (sigmoid(-100)≈0).")
 else:
+    # Checkpoint mode — may combine with --baseline to override alpha_schedule only (base-swap).
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None,
                             device=agent_cfg.device)
     runner.load(args.checkpoint)
     policy = runner.get_inference_policy(device=agent_cfg.device)
+    if args.baseline is not None:
+        print(f"  [base-swap] checkpoint loaded + alpha_schedule overridden to '{args.baseline}'.")
 
 # ---------------------------------------------------------------------------
 # Build gait switch schedule

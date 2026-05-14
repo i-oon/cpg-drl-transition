@@ -14,11 +14,20 @@ Before applying residual learning to quadruped gait transition, we ask:
    - 4D: per-leg correction
    - 12D: per-joint correction
 
-The final result is that Residual-α 12D is the best method for the main objective:
-- lowest transition-window jerk among evaluated methods
-- zero velocity reversal
-- only small CoT increase over smoothstep
-- better suited for transition timing than direct joint-space correction
+The final result is two-level: canonical (N=6, seed=42) and multi-seed (N=60, 10 seeds × 6 pairs).
+The two evaluations agree on the main finding but disagree on which method is safest.
+
+Canonical N=6 (seed=42): Res-α 12D has zero velocity reversal; Res-q 4D has mild reversal.
+Multi-seed N=60: Res-q 4D has zero reversal (0/60 windows); Res-α 12D has 30% reversal rate.
+
+The robust primary finding (holds at both N=6 and N=60):
+- ALL four residual variants beat Smoothstep on jerk_TRANS.
+
+The gait-phase-dependent finding (N=6 and N=60 disagree):
+- Velocity reversal safety depends on which gait phase is active at switch time.
+- N=6 alone is insufficient to conclude about velocity safety.
+- At N=60: Res-q 4D achieves zero reversal + lowest jerk among zero-reversal methods.
+- The per-leg uniform correction in Res-q 4D (design flaw) acts as implicit conservatism.
 
 Your responsibility:
 You have access to the project repository. Please fix and improve the project, code, results, README, and report narrative so the whole project is internally consistent and ready for a polished academic report. You do not need to make presentation slides, but the storyline should be clear enough that slides could be made from it later.
@@ -26,6 +35,8 @@ You have access to the project repository. Please fix and improve the project, c
 Important final numbers to use consistently:
 
 Single-seed canonical evaluation, seed=42, 2500 steps, 6 directed gait-pair transitions:
+Baseline CSVs corrected: sigmoid bug fixed (actions=-100, Δα≈0 during holds).
+Residual variants retrained with sparsity=-0.5, jerk_weight=-2e-10 where noted.
 
 Discrete Switch:
 - vx_mean = +0.435
@@ -37,33 +48,42 @@ Discrete Switch:
 - jerk_TRANS = 11361
 
 Linear Ramp:
-- vx_mean = +0.392
-- vx_std = 0.155
-- vx_min = -0.193
-- tilt_max = 0.196
-- h_mean = 0.405
-- CoT = 1.962
-- jerk_TRANS = 8251
+- vx_mean = +0.390
+- vx_std = 0.157
+- vx_min = -0.206
+- tilt_max = 0.184
+- h_mean = 0.404
+- CoT = 1.955
+- jerk_TRANS = 7441
 
 Smoothstep Ramp:
-- vx_mean = +0.413
+- vx_mean = +0.415
 - vx_std = 0.129
-- vx_min = -0.078
-- tilt_max = 0.189
+- vx_min = -0.096
+- tilt_max = 0.187
 - h_mean = 0.405
-- CoT = 2.052
-- jerk_TRANS = 10121
+- CoT = 2.090
+- jerk_TRANS = 8508
 
-Residual-α 4D:
-- vx_mean = +0.433
-- vx_std = 0.104
-- vx_min = +0.004
-- tilt_max = 0.186
-- h_mean = 0.406
-- CoT = 2.436
-- jerk_TRANS = 9775
+Residual-α 4D (retrained sp05_jw2):
+- vx_mean = +0.430
+- vx_std = 0.113
+- vx_min = -0.086
+- tilt_max = 0.189
+- h_mean = 0.408
+- CoT = 2.171
+- jerk_TRANS = 7617
 
-Residual-α 12D:
+Residual-q 4D (retrained sp05_jw2):
+- vx_mean = +0.416
+- vx_std = 0.100
+- vx_min = -0.024
+- tilt_max = 0.200
+- h_mean = 0.417
+- CoT = 2.158
+- jerk_TRANS = 7320
+
+Residual-α 12D (original checkpoint):
 - vx_mean = +0.427
 - vx_std = 0.109
 - vx_min = +0.004
@@ -72,15 +92,35 @@ Residual-α 12D:
 - CoT = 2.105
 - jerk_TRANS = 7951
 
-Main single-seed claims:
-- Residual-α 12D reduces jerk_TRANS by 21.4% vs Smoothstep:
-  10121 → 7951
-- Residual-α 12D reduces jerk_TRANS by 30.0% vs Discrete:
-  11361 → 7951
-- Residual-α 12D removes velocity reversal:
-  vx_min +0.004 vs Smoothstep -0.078
-- Residual-α 12D costs only about 2.6% more CoT than Smoothstep:
-  2.105 vs 2.052
+Residual-q 12D (retrained sp05_jw2):
+- vx_mean = +0.408
+- vx_std = 0.130
+- vx_min = -0.122
+- tilt_max = 0.207
+- h_mean = 0.414
+- CoT = 2.064
+- jerk_TRANS = 7719
+
+Main single-seed claims (canonical N=6, seed=42):
+- ALL four residual variants beat Smoothstep on jerk_TRANS.
+- Lowest jerk: Res-q 4D (7320), but has mild velocity reversal (vx_min=-0.024).
+- Res-α 12D reduces jerk_TRANS by 6.5% vs Smoothstep: 8508 → 7951.
+- Res-α 12D is the only method with zero velocity reversal at canonical N=6 (vx_min=+0.004).
+- Res-α 12D has comparable CoT to Smoothstep (2.105 vs 2.090, within noise).
+
+Multi-seed claims (N=60, 10 seeds × 6 pairs, seed_experiment_v2):
+- ALL four residual variants beat Smoothstep on jerk_TRANS mean.
+  Smoothstep: 9102  Res-α 4D: 8185 (−10%)  Res-α 12D: 8570 (−6%)
+  Res-q 4D: 7619 (−16%)  Res-q 12D: 7305 (−20%)
+- Velocity reversal rates at N=60:
+  Smoothstep: 55.0%  Discrete: 18.3%
+  Res-α 12D: 30.0%  Res-α 4D: 7.4%
+  Res-q 12D: 38.3%  Res-q 4D: 0.0%
+- Res-q 4D is the ONLY method with zero velocity reversal at N=60 (worst vx_min=+0.072).
+- Res-α 12D's zero-reversal property does NOT generalize: 30% reversal at N=60.
+- N=6 and N=60 agree on jerk ordering but disagree on velocity safety ranking.
+- The robust claim: all residual variants beat Smoothstep on jerk.
+- The gait-phase-dependent claim: velocity safety depends on which gait phases are tested.
 
 Per-gait-pair analysis results (N=6 directed transitions, canonical seed=42):
 
@@ -96,31 +136,24 @@ Discrete Switch:
 
 Smoothstep Ramp:
 - N = 6
-- jerk_TRANS mean = 10121
-- std = 2458
-- min = 6136
-- max = 12790
-
-Res-q 4D:
-- N = 6
-- jerk_TRANS mean = 9006
-- std = 2072
-- min = 6445
-- max = 11076
-
-Res-q 12D:
-- N = 6
-- jerk_TRANS mean = 9969
-- std = 1857
-- min = 6672
-- max = 12932
+- jerk_TRANS mean = 8508
+- std = 2610
+- min = 4233
+- max = 11801
 
 Res-α 4D:
 - N = 6
-- jerk_TRANS mean = 9775
-- std = 2738
-- min = 5489
-- max = 13804
+- jerk_TRANS mean = 7617
+- std = 3104
+- min = 4607
+- max = 13540
+
+Res-q 4D:
+- N = 6
+- jerk_TRANS mean = 7320
+- std = 1934
+- min = 4930
+- max = 10789
 
 Res-α 12D:
 - N = 6
@@ -129,73 +162,26 @@ Res-α 12D:
 - min = 4072
 - max = 12351
 
-Multi-seed experiment results (N=60: 10 seeds × 6 directed transitions):
-
-NOTE: The seed sweep was previously broken — IsaacLab internally resets numpy's global
-RNG during env init, causing np.random.uniform() to return the same hold time (2.0 s)
-for all seeds. Fixed in play_b1_phase2.py by using an isolated np.random.default_rng()
-Generator immune to IsaacLab's internal np.random.seed() calls.
-Additionally, the discrete baseline had _transition_start_steps hardcoded to int(2.0/dt),
-ignoring --randomize_start. Fixed by using _current_hold_s = _sample_transition_start().
-All 6 methods now produce 10/10 unique seed files.
-
-Discrete Switch:
-- N = 60
-- jerk_TRANS mean = 10166
-- std = 4973
-- min = 3044
-- max = 22861
-
-Smoothstep Ramp:
-- N = 60
-- jerk_TRANS mean = 8658
-- std = 3256
-- min = 3325
-- max = 15340
-
-Res-α 4D:
-- N = 60
-- jerk_TRANS mean = 8863
-- std = 2558
-- min = 4698
-- max = 15207
-
-Res-q 4D:
-- N = 60
-- jerk_TRANS mean = 9000
-- std = 2150
-- min = 4436
-- max = 14571
-
-Res-α 12D:
-- N = 60
-- jerk_TRANS mean = 8706
-- std = 2569
-- min = 4269
-- max = 13279
-
 Res-q 12D:
-- N = 60
-- jerk_TRANS mean = 8196
-- std = 2524
-- min = 3106
-- max = 13242
+- N = 6
+- jerk_TRANS mean = 7719
+- std = 1921
+- min = 4490
+- max = 10193
 
-Multi-seed interpretation:
-- Discrete is clearly worst: highest mean (10166) and highest max (22861).
-- Res-q 12D has the lowest mean (8196) in multi-seed, but it has velocity reversal (vx_min=-0.277).
-- Res-α 12D and Smoothstep are nearly tied on mean (8706 vs 8658).
-- Res-α 12D has the LOWEST MAX (13279) among all methods — best worst-case ceiling.
-- The multi-seed study confirms robustness: Res-α 12D maintains the lowest worst-case ceiling
-  across diverse gait-phase conditions, complementing its canonical (seed=42) result.
-
-Note on seed=42 framing:
-- seed=42 is the fixed canonical evaluation used for all visual diagnostics and the primary
-  quantitative comparison. It is a legitimate deterministic baseline, not a cherry-pick.
-- Do NOT describe the canonical result as a "seed artifact." The canonical evaluation IS the
-  primary study. The multi-seed study provides additional robustness evidence.
-- In the canonical evaluation, Res-α 12D achieves the lowest jerk_TRANS (7951). This is the
-  primary claim.
+Note on seed=42 vs N=60 framing:
+- seed=42 is the canonical evaluation used for all visual diagnostics (zoom plots, gait
+  diagrams, delta-alpha plots). It is a legitimate deterministic baseline used for
+  reproducible visual comparisons.
+- The N=60 multi-seed experiment (logs/phase2_seed_experiment_v2) uses the SAME corrected
+  checkpoints and sigmoid fix. It is valid and should be cited alongside N=6.
+- The two evaluations agree on jerk ordering but disagree on velocity safety:
+  N=6: Res-α 12D has zero reversal; N=60: Res-q 4D has zero reversal.
+- This disagreement is the main finding of the multi-seed study: velocity safety is
+  gait-phase-dependent and N=6 is insufficient to conclude about it.
+- Do NOT claim Res-α 12D has general zero reversal. Qualify: "at the canonical seed=42
+  evaluation" or "at the fixed gait phase used in the canonical run."
+- The N=60 v2 data supersedes the old multi-seed data (old checkpoints, pre-sigmoid fix).
 
 Note on Res-q 4D design flaw:
 - Res-q 4D applies a single scalar Δq to all three joints in each leg (hip, thigh, calf).
@@ -207,37 +193,48 @@ Note on Res-q 4D design flaw:
   scale-invariant, so a per-leg α is at least internally consistent.
 
 Important wording for claims:
-- CANONICAL: "Res-α 12D achieves the lowest transition-window jerk (7951) in the canonical
-  seed=42 evaluation, a 21% reduction vs Smoothstep (10121)."
-- MULTI-SEED: "Across 60 transition windows, Res-α 12D achieves the lowest worst-case jerk
-  (max=13279), 13% below Smoothstep (max=15340), while Res-q 12D achieves the lowest mean
-  (8196) but produces velocity reversal (vx_min=-0.277)."
-- Do NOT claim Res-α 12D has the lowest multi-seed mean jerk. It does not.
-- Correct final claim: Res-α 12D is the best method in the canonical evaluation (lowest
-  jerk_TRANS = 7951) and the safest across all conditions (lowest worst-case ceiling + no
-  velocity reversal).
+
+CANONICAL (N=6, seed=42):
+"All four residual variants beat Smoothstep on jerk_TRANS. In the canonical evaluation,
+Res-α 12D is the only method with zero velocity reversal (vx_min = +0.004), achieving
+−6.5% jerk reduction vs Smoothstep. However, this result reflects a single fixed gait
+phase at switch time."
+
+MULTI-SEED (N=60):
+"Across 60 transition windows (10 seeds × 6 gait pairs), all residual variants beat
+Smoothstep on mean jerk_TRANS (−6% to −20%). Res-q 4D achieves zero velocity reversal
+across all 60 windows while reducing jerk by 16%. Res-α 12D shows 30% reversal rate at
+N=60, indicating its zero-reversal property is gait-phase-specific."
+
+HONEST COMBINED CLAIM:
+"The primary finding — all residual variants beat Smoothstep on jerk — is robust across
+both evaluations. The velocity safety ordering is gait-phase-dependent: the canonical
+evaluation (fixed phase, N=6) favors Res-α 12D; the multi-phase evaluation (N=60) favors
+Res-q 4D. The 2×2 ablation reveals unexpected complexity: the design constraint in Res-q 4D
+(uniform per-leg correction) acts as implicit conservatism that benefits velocity safety
+across diverse gait phases."
 
 2×2 ablation table:
 
-Residual-α 4D:
-- vx_mean +0.433
-- vx_std 0.104
-- vx_min +0.004
-- tilt_max 0.186
-- h_mean 0.406
-- CoT 2.436
-- jerk_TRANS 9775
+Residual-α 4D (retrained sp05_jw2):
+- vx_mean +0.430
+- vx_std 0.113
+- vx_min -0.086
+- tilt_max 0.189
+- h_mean 0.408
+- CoT 2.171
+- jerk_TRANS 7617
 
-Residual-q 4D:
-- vx_mean +0.410
-- vx_std 0.134
-- vx_min -0.149
-- tilt_max 0.192
-- h_mean 0.405
-- CoT 2.057
-- jerk_TRANS 9006
+Residual-q 4D (retrained sp05_jw2):
+- vx_mean +0.416
+- vx_std 0.100
+- vx_min -0.024
+- tilt_max 0.200
+- h_mean 0.417
+- CoT 2.158
+- jerk_TRANS 7320
 
-Residual-α 12D:
+Residual-α 12D (original checkpoint):
 - vx_mean +0.427
 - vx_std 0.109
 - vx_min +0.004
@@ -246,22 +243,34 @@ Residual-α 12D:
 - CoT 2.105
 - jerk_TRANS 7951
 
-Residual-q 12D:
-- vx_mean +0.410
-- vx_std 0.133
-- vx_min -0.277
-- tilt_max 0.187
-- h_mean 0.413
-- CoT 2.193
-- jerk_TRANS 9969
+Residual-q 12D (retrained sp05_jw2):
+- vx_mean +0.408
+- vx_std 0.130
+- vx_min -0.122
+- tilt_max 0.207
+- h_mean 0.414
+- CoT 2.064
+- jerk_TRANS 7719
 
-Interpretation:
-- α-space is safer because it preserves interpolation between two frozen valid policies.
-- q-space can be energy-efficient or lower variance in some cases, but it can produce velocity reversal.
-- 12D α gives the best jerk reduction.
-- 4D α is simpler and already safe, but not best on jerk.
-- Smoothstep remains a strong simple baseline with low CoT, but it still has velocity reversal and higher jerk than Residual-α 12D.
-- Do not present other methods as simply bad. Present trade-offs.
+Interpretation (canonical N=6):
+- ALL four residual variants beat Smoothstep on jerk_TRANS (8508). This is the main finding.
+- Within α-space: 4D (7617) achieves lower jerk than 12D (7951). Both have mild reversal at
+  N=6 except 12D which has zero reversal at the fixed canonical gait phase.
+- Within q-space: 4D (7320) lower jerk than 12D (7719); both show reversal at N=6.
+- Smoothstep has velocity reversal (vx_min=−0.096) and higher jerk than all residual variants.
+
+Interpretation (multi-seed N=60, seed_experiment_v2):
+- ALL four residual variants beat Smoothstep on mean jerk (9102).
+  Res-q 4D: 7619 (−16%)  Res-q 12D: 7305 (−20%)
+  Res-α 4D: 8185 (−10%)  Res-α 12D: 8570 (−6%)
+- Velocity reversal rates:
+  Res-q 4D: 0%  Res-α 4D: 7%  Discrete: 18%
+  Res-α 12D: 30%  Res-q 12D: 38%  Smoothstep: 55%
+- The safety ordering flips vs canonical: Res-q 4D has zero reversal at N=60, not Res-α 12D.
+- Res-q 12D has the lowest jerk (7305) but worst reversal among residual variants (38%).
+- The conservative action space of Res-q 4D (same scalar to all joints → small values)
+  appears to provide implicit safety across diverse gait phases.
+- Do not present other methods as simply bad. Present trade-offs at both evaluation levels.
 
 ====================================================================
 REQUIRED STRUCTURE / TABLE OF CONTENTS
@@ -609,58 +618,42 @@ Please do the following in the repository:
 
 
 ====================================================================
-SEED=42 VS MULTI-SEED EVALUATION: REQUIRED CLARIFICATION
+SEED=42 VS MULTI-SEED EVALUATION: CLARIFICATION (UPDATED)
 ====================================================================
 
-Please make the role of seed=42 and the multi-seed experiment explicit and consistent throughout the README/report.
+Two evaluation levels are used and BOTH are valid:
 
-Current evaluation uses two levels:
+1. Canonical single-seed evaluation (seed=42):
+   - seed = 42, 2500 steps, 6 directed gait pairs (fixed sequence)
+   - Used for all visual diagnostics: discrete spike, transition zoom, gait diagrams,
+     body state plots, Δα / residual plots.
+   - All methods compared under identical fixed transition sequence and initial condition.
+   - Per-gait-pair jerk_TRANS (N=6) is computed from this single episode — the 6 values
+     come from the 6 directed transitions in that one run.
 
-1. Canonical single-seed evaluation:
-   - seed = 42
-   - used for detailed diagnostic comparison
-   - used to generate plots such as:
-     - discrete spike plot
-     - transition zoom
-     - gait diagram
-     - body state plot
-     - Δα / residual plot
-   - used because all methods are compared under the same fixed transition sequence and initial condition
-   - useful for visual interpretation and debugging
+2. Multi-seed robustness evaluation (N=60, seed_experiment_v2):
+   - 10 seeds × 6 gait pairs = 60 windows per method.
+   - Uses --randomize_start: _transition_start_s ~ Uniform(1.5, 3.5) s per seed.
+   - Seeds hit the switch at DIFFERENT gait phases → genuine jerk and reversal variation.
+   - Data in logs/phase2_seed_experiment_v2/ (corrected checkpoints + sigmoid fix).
+   - This IS a valid multi-seed robustness study. Use it.
+   - Note: a PREVIOUS old experiment (logs/phase2_seed_experiment/) used env_cfg.seed
+     only (no --randomize_start), so all seeds produced identical results. That old
+     experiment was superseded by v2. Do not cite the old experiment.
 
-2. Per-gait-pair analysis (N=6):
-   - 6 directed gait-pair transitions from the canonical seed=42 episode
-   - used for per-pair jerk_TRANS mean, std, min, max
-   - this shows which gait pairs are structurally hard vs easy and is the spread reported
-     alongside the canonical mean
-   - A 10-seed sweep was run but found no variation: env_cfg.seed does not change
-     jerk_TRANS because transition timing is pinned and domain randomization does not
-     affect gait-phase at switch time. The “10-seed” files are identical copies of
-     the same canonical run. Do NOT describe this as a multi-seed robustness study.
-
-Important wording:
-Do NOT present seed=42 as the only evaluation.
-Frame seed=42 as the canonical diagnostic run AND the source of all per-gait-pair data.
-
-Correct framing:
-“The evaluation uses the canonical seed=42 episode. Jerk_TRANS is computed per gait
-pair (N=6), revealing the per-pair difficulty hierarchy. All quantitative claims
-derive from this deterministic canonical episode.”
+IMPORTANT: Do NOT claim Res-α 12D has general zero reversal.
+At canonical N=6: Res-α 12D zero reversal (vx_min=+0.004).
+At N=60: Res-α 12D 30% reversal rate; Res-q 4D ZERO reversal.
+Always qualify the zero-reversal claim with the evaluation level.
 
 Use section labels:
-- “Canonical Evaluation (seed=42)”
+- “Canonical Evaluation (seed=42)” or “Canonical N=6”
 - “Per-Gait-Pair Analysis (N=6)”
-
-Do NOT use:
-- “Robustness Evaluation (10 seeds × 6 transitions = 60 windows)”
-- “Across 60 transition windows”
-- “60-window”
-
-If reporting spread, phrase it as:
-“Across 6 directed gait-pair transitions…”
+- “Multi-Seed Robustness Evaluation (N=60)”
 
 Results are interpreted correctly when:
-- Residual-α 12D has the lowest mean jerk_TRANS (N=6, mean=7951).
-- Residual-α 12D does NOT have the tightest per-gait-pair spread.
-- q-space variants may have tighter spread but suffer velocity reversal.
-- The final claim combines mean jerk, vx_min, and CoT.
+- N=6 and N=60 AGREE on jerk ordering (all residual variants beat Smoothstep).
+- N=6 and N=60 DISAGREE on velocity safety ranking.
+- N=6: Res-α 12D zero reversal; N=60: Res-q 4D zero reversal.
+- The robust claim is jerk. The phase-dependent claim is reversal safety.
+- The final claim combines both evaluations and acknowledges the disagreement.

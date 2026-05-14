@@ -38,11 +38,13 @@ WIN_STEPS    = int(TRANS_S / dt) + PAD_POST   # 175 steps total
 TRANS_STEPS  = int(TRANS_S / dt)              # 150 steps = 3 s
 
 RUNS = {
-    "Discrete switch":  ("logs/phase2/baselines/discrete/playback_seed42.csv",        "#d62728", 0.85),
-    "Linear ramp":      ("logs/phase2/baselines/linear_ramp/playback_seed42.csv",     "#ff7f0e", 0.75),
-    "Smoothstep ramp":  ("logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv", "#2ca02c", 0.75),
-    "Residual-α 4D":    ("logs/phase2/phase2_v10/playback_seed42.csv",                "#aec7e8", 0.75),
-    "Residual-α 12D":   ("logs/phase2/residual_alpha_12d/playback_seed42.csv",        "#1f77b4", 0.90),
+    "Discrete switch":  ("logs/phase2/baselines/discrete/playback_seed42.csv",                "#d62728", 0.85),
+    "Linear ramp":      ("logs/phase2/baselines/linear_ramp/playback_seed42.csv",             "#ff7f0e", 0.75),
+    "Smoothstep ramp":  ("logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv",         "#2ca02c", 0.75),
+    "Residual-α 4D":    ("logs/phase2/residual_alpha_4d_sp05_jw2/playback_seed42.csv",        "#aec7e8", 0.75),
+    "Residual-q 4D":    ("logs/phase2/residual_q_4d_sp05_jw2/playback_seed42.csv",            "#ffbb78", 0.75),
+    "Residual-α 12D":   ("logs/phase2/residual_alpha_12d/playback_seed42.csv",                "#1f77b4", 0.90),
+    "Residual-q 12D":   ("logs/phase2/residual_q_12d_sp05_jw2/playback_seed42.csv",           "#9467bd", 0.75),
 }
 
 # ---------------------------------------------------------------------------
@@ -97,8 +99,9 @@ for idx, (label, (path, color, alpha)) in enumerate(RUNS.items()):
 
     mat = np.array(windows)   # (n_windows, WIN_STEPS)
 
-    # Transition-window scalar RMS
-    jt_rms = float(np.sqrt(np.mean(mat[:, :TRANS_STEPS] ** 2)))
+    # Transition-window scalar: mean of per-window RMS (consistent with analyze_seed_experiment.py)
+    per_win_rms = np.sqrt(np.mean(mat[:, :TRANS_STEPS] ** 2, axis=1))  # (n_windows,)
+    jt_rms = float(per_win_rms.mean())
     summary_rms[label] = jt_rms
 
     # RMS per time bin, averaged across windows

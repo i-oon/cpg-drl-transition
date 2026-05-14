@@ -35,6 +35,8 @@ parser.add_argument("--warmstart", type=str, default=None,
                          "Noise std is reset to the configured init_noise_std.")
 parser.add_argument("--rew_residual_sparsity", type=float, default=None,
                     help="Override rew_residual_sparsity. Use 0.0 for the no-sparsity ablation.")
+parser.add_argument("--rew_joint_jerk", type=float, default=None,
+                    help="Override rew_joint_jerk. Use 0.0 for no-jerk-penalty baseline.")
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -142,6 +144,9 @@ env_cfg.seed = args.seed
 if args.rew_residual_sparsity is not None:
     env_cfg.rew_residual_sparsity = args.rew_residual_sparsity
     print(f"  [override] rew_residual_sparsity = {args.rew_residual_sparsity}")
+if args.rew_joint_jerk is not None:
+    env_cfg.rew_joint_jerk = args.rew_joint_jerk
+    print(f"  [override] rew_joint_jerk = {args.rew_joint_jerk}")
 
 # Verify all four base policy checkpoints exist
 for path in env_cfg.base_policy_paths:
