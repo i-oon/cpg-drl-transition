@@ -66,6 +66,18 @@ done
 
 echo ""
 echo "================================================================"
+echo "  Smoothstep-q  (passive q-space baseline, Δq≡0)"
+echo "  Identical smoothstep schedule to smoothstep_ramp but uses"
+echo "  residual_mode=joint code path — confirms Smoothstep-α ≡ Smoothstep-q"
+echo "  and establishes q-space starting point for Residual-q comparison."
+echo "================================================================"
+for seed in 0 1 2 3 4 5 6 7 8 9; do
+    run_seed "smoothstep_q" "$seed" \
+        "--task Isaac-B1-Phase2-Joint4D-v0 --baseline smoothstep_q"
+done
+
+echo ""
+echo "================================================================"
 echo "  Residual-α 4D  (sp05_jw2)"
 echo "================================================================"
 for seed in 0 1 2 3 4 5 6 7 8 9; do

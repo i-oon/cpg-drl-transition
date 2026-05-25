@@ -26,11 +26,14 @@ parser.add_argument("--task", type=str, default="Isaac-B1-Phase2-Transition-v0")
 parser.add_argument("--checkpoint", type=str, default=None,
                     help="Checkpoint path. Not required when --baseline is set.")
 parser.add_argument("--baseline", type=str, default=None,
-                    choices=["linear_ramp", "smoothstep_ramp", "discrete"],
+                    choices=["linear_ramp", "smoothstep_ramp", "discrete", "smoothstep_q"],
                     help="Run a no-training baseline instead of a learned policy.\n"
                          "  linear_ramp    — pure hand-designed linear α ramp, Δα≡0\n"
                          "  smoothstep_ramp — same with smoothstep α schedule (v7 schedule)\n"
-                         "  discrete       — instant α=1 at switch time, no ramp")
+                         "  discrete       — instant α=1 at switch time, no ramp\n"
+                         "  smoothstep_q   — smoothstep blending in joint-position space, Δq≡0\n"
+                         "                   (q-space analogue of smoothstep_ramp; use with\n"
+                         "                    --task Isaac-B1-Phase2-Joint4D-v0)")
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--steps", type=int, default=2000)
 parser.add_argument("--gait_pairs", type=str, default="trot,bound,pace",
@@ -62,6 +65,13 @@ parser.add_argument("--randomize_start", action="store_true",
                          "transition_start_max_s] at each gait switch instead of pinning to 2.0 s. "
                          "Uses the seeded numpy RNG so results are reproducible per seed. "
                          "Enables genuine cross-seed variation in gait-phase at switch time.")
+parser.add_argument("--env_idx", type=int, default=0,
+                    help="Index of the environment to log (0-based). Run with --best_env first to "
+                         "identify the best-performing env, then re-run with --env_idx N.")
+parser.add_argument("--best_env", action="store_true",
+                    help="After the episode, rank all envs by mean vx_min during transition windows "
+                         "and print the best env index. Combine with --num_envs 16 for a sweep. "
+                         "Does NOT change the logged env — re-run with --env_idx N to log it.")
 args = parser.parse_args()
 
 # Video implies headless cameras
@@ -152,6 +162,12 @@ elif args.baseline == "smoothstep_ramp":
     env_cfg.alpha_schedule = "smoothstep"
 elif args.baseline == "discrete":
     env_cfg.alpha_schedule = "linear"   # discrete overrides α at switch time in the loop
+elif args.baseline == "smoothstep_q":
+    # q-space analogue: same smoothstep α schedule, residual_mode="joint", Δq≡0.
+    # Must be run with --task Isaac-B1-Phase2-Joint4D-v0 (or Joint12D) so the env
+    # uses tanh-based action processing. The zero-action lambda below sends 0.0
+    # (tanh(0)=0 → Δq=0) rather than -100.0 (which would give tanh(-100)=-1 → Δq=-0.25).
+    env_cfg.alpha_schedule = "smoothstep"
 
 # Camera follows env 0's robot
 cam_eye = tuple(float(x) for x in args.cam_eye.split(","))
@@ -189,12 +205,19 @@ env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 # ---------------------------------------------------------------------------
 
 if args.baseline is not None and args.checkpoint is None:
-    # Pure no-training baseline: send large-negative actions → sigmoid(-100)≈0 → Δα≈0
-    # NOTE: torch.zeros() would give sigmoid(0)=0.5 → Δα=0.15 constant, corrupting baselines.
     _n_actions = env.num_actions
     _device    = agent_cfg.device
-    policy = lambda obs: torch.full((obs.shape[0], _n_actions), -100.0, device=_device)
-    print(f"  [baseline={args.baseline}] No checkpoint loaded — using Δα≡0 actions (sigmoid(-100)≈0).")
+    _is_joint_mode = getattr(env.unwrapped.cfg, "residual_mode", "alpha") == "joint"
+    if _is_joint_mode:
+        # Joint-mode uses tanh: send 0.0 → tanh(0)=0 → Δq=0 exactly.
+        # Do NOT send -100.0 here — tanh(-100)=-1.0 → Δq=-0.25 for every joint.
+        policy = lambda obs: torch.zeros((obs.shape[0], _n_actions), device=_device)
+        print(f"  [baseline={args.baseline}] joint-mode — using Δq≡0 actions (tanh(0)=0).")
+    else:
+        # Alpha-mode uses sigmoid: send -100.0 → sigmoid(-100)≈0 → Δα≈0.
+        # Do NOT send zeros — sigmoid(0)=0.5 → Δα=0.15 constant, corrupting baselines.
+        policy = lambda obs: torch.full((obs.shape[0], _n_actions), -100.0, device=_device)
+        print(f"  [baseline={args.baseline}] alpha-mode — using Δα≡0 actions (sigmoid(-100)≈0).")
 else:
     # Checkpoint mode — may combine with --baseline to override alpha_schedule only (base-swap).
     runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None,
@@ -284,7 +307,13 @@ termination_hist = []        # (T,) bool — True if env0 terminated after this 
 robot = env.unwrapped._robot
 contact_sensor = env.unwrapped._contact_sensor
 foot_ids = env.unwrapped._foot_ids    # [FL, FR, RL, RR] indices into sensor
-e0_idx = 0  # env 0 for verbose printing
+e0_idx = args.env_idx  # primary env for logging; set via --env_idx
+
+# Per-env vx tracking for --best_env selection.
+# Tracks running per-env vx minimum during detected transition windows.
+_n_envs = env.num_envs
+_vx_all_hist: list[np.ndarray] = []          # (T, num_envs) — only populated if needed
+_alpha_base_all_hist: list[float] = []       # (T,) alpha_baseline of primary env (already in alpha_baseline_hist)
 
 # Override env's gait sampling — schedule deterministic transitions
 seq_idx = 0
@@ -366,6 +395,8 @@ for step in range(args.steps):
     vx_hist.append(vx); h_hist.append(h); tilt_hist.append(tilt); vz_hist.append(vz)
     delta_hist.append(delta)
     gait_hist.append((current_name, target_name))
+    if args.best_env:
+        _vx_all_hist.append(robot.data.root_lin_vel_b[:, 0].cpu().numpy().copy())
     joint_pos_hist.append(jp)
     joint_vel_hist.append(jv)
     joint_acc_hist.append(ja)
@@ -450,7 +481,34 @@ termination_times = np.where(term_a)[0] * control_dt
 
 # Print termination count
 n_terms = int(term_a.sum())
-print(f"  Terminations  : {n_terms}  (env 0 resets during playback)")
+print(f"  Terminations  : {n_terms}  (env {e0_idx} resets during playback)")
+
+# --best_env: rank all envs by vx_min during detected transition windows.
+if args.best_env and _vx_all_hist:
+    vx_all = np.stack(_vx_all_hist, axis=0)        # (T, num_envs)
+    ab_all = np.array([alb_a[t, 0] for t in range(len(alb_a))])  # primary env α_base proxy
+    # Detect transition windows using same logic as analyze_seed_experiment.py
+    _trans_starts = []
+    for _i in range(1, len(ab_all)):
+        if ab_all[_i - 1] < 0.02 and ab_all[_i] >= 0.02:
+            _trans_starts.append(_i)
+    if _trans_starts:
+        # Per-env vx_min across all detected windows (150 steps each)
+        env_scores = np.full(_n_envs, np.inf)
+        for _s in _trans_starts:
+            _end = min(_s + 150, len(vx_all))
+            window_min = vx_all[_s:_end].min(axis=0)   # (num_envs,)
+            env_scores = np.minimum(env_scores, window_min)
+        ranked = np.argsort(env_scores)[::-1]   # descending: best first
+        print()
+        print("  Best-env ranking (by worst-case vx_min across transition windows):")
+        for _rank, _ei in enumerate(ranked[:min(5, _n_envs)]):
+            marker = " ← best" if _rank == 0 else ""
+            print(f"    #{_rank+1:2d}  env {_ei:2d}  vx_min = {env_scores[_ei]:+.4f} m/s{marker}")
+        best = int(ranked[0])
+        print(f"\n  Re-run with --env_idx {best} to log the best env to CSV/video.")
+    else:
+        print("  --best_env: no transition windows detected; check gait_pairs and steps.")
 
 # Cost of Transport over the run
 distance = max(x_a[-1] - x_a[0], 1e-6)              # m

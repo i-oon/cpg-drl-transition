@@ -157,6 +157,11 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # v10 (sigmoid, max=0.3): asymmetric clamp — Δα ∈ [0, 0.3] only.
     #   Sigmoid removes negative-Δα capability (no more delay below smoothstep).
     #   max=0.3 prevents E2E-style aggressive ramp compression.
+    # V2 (bidirectional_alpha=True, tanh, max=0.3): restores symmetric range
+    #   Δα ∈ [−0.3, +0.3] so the MLP can DELAY a leg (wait for phase alignment)
+    #   as well as advance it. This is the architecturally correct range for
+    #   correcting phase mismatch between frozen policies.
+    bidirectional_alpha: bool = False
     #   Net constraint: α_baseline ≤ α_per_joint ≤ α_baseline + 0.3.
     delta_alpha_max: float = 0.3
 
@@ -400,3 +405,89 @@ class B1Phase2ActionSpacePhaseAwareEnvCfg(B1Phase2ActionSpaceEnvCfg):
     rew_residual_sparsity: float = -0.5
     rew_joint_acc: float = 0.0
     rew_joint_jerk: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# V2 configs — policy-output phase observation + randomised duration
+#
+# Observation (70D):
+#   base(45) + norm_duration(1) + π_current(12) + π_target(12) = 70
+#
+# The frozen-policy outputs π_current and π_target are direct gait-phase
+# signals: the MLP can see what each frozen policy is commanding at every
+# step, giving it the phase relationship needed to time its corrections.
+# This is richer than the binary foot-contact proxy (obs_space=49).
+#
+# Duration is sampled ∈ [1.5, 5.0]s each episode so the MLP learns a
+# general correction strategy rather than a 3s-specific one. norm_duration
+# is included in the observation so the MLP can condition on ramp speed.
+#
+# Jerk penalty removed (rew_joint_jerk=0, rew_joint_acc=0): the policy
+# has one task — velocity tracking — and should discover low-jerk behaviour
+# as a consequence of not stumbling, not because jerk is explicitly penalised.
+# A direct vx_window penalty (weight=2.0) during the transition window
+# provides the safety signal jerk_penalty was trying to proxy.
+# ---------------------------------------------------------------------------
+
+@configclass
+class B1Phase2V2Alpha4DEnvCfg(B1Phase2EnvCfg):
+    """V2: Residual-α 4D with policy-phase observation + randomised duration.
+
+    Correction space: α (blending weight), action_space=4 (per-leg).
+    Bidirectional: Δα ∈ [−0.3, +0.3] — MLP can delay or advance per leg.
+    """
+    observation_space: int = 70
+    transition_duration_min_s: float = 1.5
+    transition_duration_max_s: float = 5.0
+    rew_joint_jerk: float = 0.0
+    rew_joint_acc: float = 0.0
+    rew_residual_sparsity: float = -0.5
+    rew_vx_window: float = 2.0
+    bidirectional_alpha: bool = True
+
+
+@configclass
+class B1Phase2V2Alpha12DEnvCfg(B1Phase2Alpha12DEnvCfg):
+    """V2: Residual-α 12D with policy-phase observation + randomised duration.
+
+    Correction space: α (blending weight), action_space=12 (per-joint).
+    Bidirectional: Δα ∈ [−0.3, +0.3] — MLP can delay or advance per joint.
+    """
+    observation_space: int = 70
+    transition_duration_min_s: float = 1.5
+    transition_duration_max_s: float = 5.0
+    rew_joint_jerk: float = 0.0
+    rew_joint_acc: float = 0.0
+    rew_residual_sparsity: float = -0.5
+    rew_vx_window: float = 2.0
+    bidirectional_alpha: bool = True
+
+
+@configclass
+class B1Phase2V2Joint4DEnvCfg(B1Phase2Joint4DEnvCfg):
+    """V2: Residual-q 4D with policy-phase observation + randomised duration.
+
+    Correction space: q (joint position), action_space=4 (per-leg scalar).
+    """
+    observation_space: int = 70
+    transition_duration_min_s: float = 1.5
+    transition_duration_max_s: float = 5.0
+    rew_joint_jerk: float = 0.0
+    rew_joint_acc: float = 0.0
+    rew_residual_sparsity: float = -0.5
+    rew_vx_window: float = 2.0
+
+
+@configclass
+class B1Phase2V2Joint12DEnvCfg(B1Phase2ActionSpaceEnvCfg):
+    """V2: Residual-q 12D with policy-phase observation + randomised duration.
+
+    Correction space: q (joint position), action_space=12 (per-joint).
+    """
+    observation_space: int = 70
+    transition_duration_min_s: float = 1.5
+    transition_duration_max_s: float = 5.0
+    rew_joint_jerk: float = 0.0
+    rew_joint_acc: float = 0.0
+    rew_residual_sparsity: float = -0.5
+    rew_vx_window: float = 2.0

@@ -117,6 +117,11 @@ class B1Phase2Env(DirectRLEnv):
             device=self.device,
         ).expand(self.num_envs, 3).clone()
 
+        # Phase-observation buffers for V2 configs (obs_space >= 70).
+        # Populated by _pre_physics_step; zero on the first observation call.
+        self._last_action_current = torch.zeros(self.num_envs, 12, device=self.device)
+        self._last_action_target = torch.zeros(self.num_envs, 12, device=self.device)
+
     # ------------------------------------------------------------------
     # DirectRLEnv interface
     # ------------------------------------------------------------------
@@ -192,11 +197,20 @@ class B1Phase2Env(DirectRLEnv):
             # Earlier versions used tanh(action) × 0.8 = Δα ∈ [−0.8, +0.8].
             # Supports 1-D scalar (Residual-1D), 4-D per-leg (Residual-α 4D),
             # and 12-D per-joint (Residual-α 12D).
-            if actions.shape[1] == 1:
-                delta_alpha = torch.sigmoid(actions[:, 0:1]) * self.cfg.delta_alpha_max
-                delta_alpha = delta_alpha.expand(self.num_envs, 4)   # (E, 4) broadcast
+            if getattr(self.cfg, "bidirectional_alpha", False):
+                # V2: tanh → Δα ∈ [−max, +max]. MLP can delay (Δα<0) or advance (Δα>0).
+                if actions.shape[1] == 1:
+                    delta_alpha = torch.tanh(actions[:, 0:1]) * self.cfg.delta_alpha_max
+                    delta_alpha = delta_alpha.expand(self.num_envs, 4)
+                else:
+                    delta_alpha = torch.tanh(actions) * self.cfg.delta_alpha_max
             else:
-                delta_alpha = torch.sigmoid(actions) * self.cfg.delta_alpha_max  # (E, 4|12)
+                # Legacy: sigmoid → Δα ∈ [0, max]. Advance-only.
+                if actions.shape[1] == 1:
+                    delta_alpha = torch.sigmoid(actions[:, 0:1]) * self.cfg.delta_alpha_max
+                    delta_alpha = delta_alpha.expand(self.num_envs, 4)
+                else:
+                    delta_alpha = torch.sigmoid(actions) * self.cfg.delta_alpha_max
 
             # --- Hard time-gate the residual ---
             # Δα is forced to zero OUTSIDE the transition window. This guarantees
@@ -318,7 +332,7 @@ class B1Phase2Env(DirectRLEnv):
             # range) so the value stays in [0.3, 1.0] during training.
             norm_duration = (self._transition_duration_env / 5.0).unsqueeze(1)  # (E, 1)
             obs_parts.append(norm_duration)
-        if self.cfg.observation_space >= 49:
+        if 49 <= self.cfg.observation_space < 70:
             # Phase-aware variant: append 4D binary foot contact (FL/FR/RL/RR).
             # Gives the MLP an explicit gait-phase proxy at switch time so it
             # can condition corrections on which legs are in stance/swing.
@@ -328,6 +342,17 @@ class B1Phase2Env(DirectRLEnv):
             )  # (E, 4, 3)
             foot_contact = (torch.norm(foot_forces, dim=-1) > 1.0).float()  # (E, 4)
             obs_parts.append(foot_contact)
+        if self.cfg.observation_space >= 70:
+            # V2: policy-phase observation — frozen-policy outputs give the MLP
+            # direct visibility into each gait's current phase state.
+            # π_current(12) + π_target(12) together encode the phase relationship
+            # at switch time better than binary foot contact.
+            # norm_duration(1) lets the MLP condition on ramp speed when duration
+            # is randomised during training.
+            norm_duration = (self._transition_duration_env / 5.0).unsqueeze(1)  # (E, 1)
+            obs_parts.append(norm_duration)
+            obs_parts.append(self._last_action_current)   # (E, 12) π_current output
+            obs_parts.append(self._last_action_target)    # (E, 12) π_target output
         obs = torch.cat(obs_parts, dim=1)
         return {"policy": obs}
 
@@ -641,6 +666,47 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2ActionSpacePhaseAwareEnvCfg",
         "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2ActionSpacePhaseAwarePPORunnerCfg",
+    },
+)
+
+# V2: policy-phase observation + randomised duration (obs=70)
+gym.register(
+    id="Isaac-B1-Phase2-V2-Alpha4D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V2Alpha4DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V2Alpha4DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V2-Alpha12D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V2Alpha12DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V2Alpha12DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V2-Joint4D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V2Joint4DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V2Joint4DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V2-Joint12D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V2Joint12DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V2Joint12DPPORunnerCfg",
     },
 )
 

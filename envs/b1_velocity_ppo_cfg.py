@@ -187,3 +187,28 @@ class Phase2Joint4DPhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
 class Phase2ActionSpacePhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
     """Residual-q 12D with foot-contact phase observation (49D obs)."""
     experiment_name = "b1_phase2_residual_q_12d_phase_aware"
+
+
+# V2: policy-phase observation + randomised duration (70D obs)
+@configclass
+class Phase2V2Alpha4DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V2: Residual-α 4D, policy-phase obs, randomised duration."""
+    experiment_name = "b1_phase2_v2_alpha_4d"
+
+
+@configclass
+class Phase2V2Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V2: Residual-α 12D, policy-phase obs, randomised duration."""
+    experiment_name = "b1_phase2_v2_alpha_12d"
+
+
+@configclass
+class Phase2V2Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V2: Residual-q 4D, policy-phase obs, randomised duration."""
+    experiment_name = "b1_phase2_v2_joint_4d"
+
+
+@configclass
+class Phase2V2Joint12DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V2: Residual-q 12D, policy-phase obs, randomised duration."""
+    experiment_name = "b1_phase2_v2_joint_12d"
