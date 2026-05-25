@@ -88,11 +88,15 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2EnvCfg, B1Phase2E2EEnvCfg,
     B1Phase2Residual1DEnvCfg, B1Phase2E2ERateEnvCfg,
     B1Phase2ActionSpaceEnvCfg, B1Phase2Joint4DEnvCfg, B1Phase2Alpha12DEnvCfg,
+    B1Phase2Alpha12DPhaseAwareEnvCfg, B1Phase2Alpha4DPhaseAwareEnvCfg,
+    B1Phase2Joint4DPhaseAwareEnvCfg, B1Phase2ActionSpacePhaseAwareEnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import (
     Phase2PPORunnerCfg, Phase2E2EPPORunnerCfg,
     Phase2Residual1DPPORunnerCfg, Phase2E2ERatePPORunnerCfg,
     Phase2ActionSpacePPORunnerCfg, Phase2Joint4DPPORunnerCfg, Phase2Alpha12DPPORunnerCfg,
+    Phase2Alpha12DPhaseAwarePPORunnerCfg, Phase2Alpha4DPhaseAwarePPORunnerCfg,
+    Phase2Joint4DPhaseAwarePPORunnerCfg, Phase2ActionSpacePhaseAwarePPORunnerCfg,
 )
 from isaaclab.envs.common import ViewerCfg
 
@@ -110,6 +114,10 @@ _task_cfg_map = {
     "Isaac-B1-Phase2-ActionSpace-v0": (Phase2ActionSpacePPORunnerCfg, B1Phase2ActionSpaceEnvCfg),
     "Isaac-B1-Phase2-Joint4D-v0":     (Phase2Joint4DPPORunnerCfg,    B1Phase2Joint4DEnvCfg),
     "Isaac-B1-Phase2-Alpha12D-v0":    (Phase2Alpha12DPPORunnerCfg,   B1Phase2Alpha12DEnvCfg),
+    "Isaac-B1-Phase2-Alpha12D-PhaseAware-v0":    (Phase2Alpha12DPhaseAwarePPORunnerCfg,   B1Phase2Alpha12DPhaseAwareEnvCfg),
+    "Isaac-B1-Phase2-Alpha4D-PhaseAware-v0":     (Phase2Alpha4DPhaseAwarePPORunnerCfg,    B1Phase2Alpha4DPhaseAwareEnvCfg),
+    "Isaac-B1-Phase2-Joint4D-PhaseAware-v0":     (Phase2Joint4DPhaseAwarePPORunnerCfg,    B1Phase2Joint4DPhaseAwareEnvCfg),
+    "Isaac-B1-Phase2-ActionSpace-PhaseAware-v0": (Phase2ActionSpacePhaseAwarePPORunnerCfg, B1Phase2ActionSpacePhaseAwareEnvCfg),
 }
 _runner_cls, _env_cls = _task_cfg_map.get(
     args.task, (Phase2PPORunnerCfg, B1Phase2EnvCfg)

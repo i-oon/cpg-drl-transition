@@ -212,6 +212,10 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # this yields the explainability story: Δα ≈ 0 in steady-state, small
     # but nonzero during transitions only when it stabilizes the body.
     rew_residual_sparsity: float = -3.0
+    # Velocity-stability penalty during transition window only.
+    # Penalises (vx − cmd_vx)² weighted by in_window, so the MLP learns to
+    # maintain forward speed through phase transitions. Default 0 → disabled.
+    rew_vx_window: float = 0.0
     target_height: float = 0.42
 
     # Termination
@@ -332,3 +336,67 @@ class B1Phase2Alpha12DEnvCfg(B1Phase2EnvCfg):
     residual_mode: str = "alpha"
     action_space: int = 12
     # delta_alpha_max inherited (0.3) — same sigmoid bound as 4D variant
+
+
+@configclass
+class B1Phase2Alpha12DPhaseAwareEnvCfg(B1Phase2Alpha12DEnvCfg):
+    """Residual-α 12D with foot-contact phase observation.
+
+    Adds 4D binary foot contact (FL/FR/RL/RR) to observation so the MLP has
+    an explicit gait-phase proxy at switch time — the root cause of N=6/N=60
+    velocity-safety disagreement is the MLP having no phase observation.
+
+    Observation: 45D base + 4D foot contact = 49D.
+    Reward: no jerk/jacc shaping — smoothness emerges naturally from velocity
+    tracking + sparsity + phase-aware corrections (AllGaits philosophy).
+    """
+
+    observation_space: int = 49
+    rew_residual_sparsity: float = -0.5
+    rew_joint_acc: float = 0.0    # dropped: let policy find smooth behavior naturally
+    rew_joint_jerk: float = 0.0   # dropped: let policy find low-jerk naturally
+
+
+# ---------------------------------------------------------------------------
+# Phase-aware variants of the full 2×2 ablation
+# All share: obs=49D (45D base + 4D foot contact), sparsity=-0.5,
+# rew_joint_acc=0, rew_joint_jerk=0.  Only output space and dimension vary.
+# ---------------------------------------------------------------------------
+
+@configclass
+class B1Phase2Alpha4DPhaseAwareEnvCfg(B1Phase2EnvCfg):
+    """Residual-α 4D with foot-contact phase observation.
+
+    2×2 ablation: α-space × 4D (per-leg blending weight).
+    Same reward recipe as Alpha12DPhaseAware: no jerk/jacc shaping.
+    """
+    observation_space: int = 49
+    rew_residual_sparsity: float = -0.5
+    rew_joint_acc: float = 0.0
+    rew_joint_jerk: float = 0.0
+
+
+@configclass
+class B1Phase2Joint4DPhaseAwareEnvCfg(B1Phase2Joint4DEnvCfg):
+    """Residual-q 4D with foot-contact phase observation.
+
+    2×2 ablation: q-space × 4D (per-leg joint-position correction).
+    Same reward recipe as Alpha12DPhaseAware: no jerk/jacc shaping.
+    """
+    observation_space: int = 49
+    rew_residual_sparsity: float = -0.5
+    rew_joint_acc: float = 0.0
+    rew_joint_jerk: float = 0.0
+
+
+@configclass
+class B1Phase2ActionSpacePhaseAwareEnvCfg(B1Phase2ActionSpaceEnvCfg):
+    """Residual-q 12D with foot-contact phase observation.
+
+    2×2 ablation: q-space × 12D (per-joint position correction).
+    Same reward recipe as Alpha12DPhaseAware: no jerk/jacc shaping.
+    """
+    observation_space: int = 49
+    rew_residual_sparsity: float = -0.5
+    rew_joint_acc: float = 0.0
+    rew_joint_jerk: float = 0.0

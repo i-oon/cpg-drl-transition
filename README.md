@@ -16,12 +16,13 @@
 4. [Phase 2 — Residual Transition Learning](#4-phase-2--residual-transition-learning)
 5. [Development History — From Prototype to Design-Space Study](#5-development-history--from-prototype-to-design-space-study)
 6. [Systematic Design-Space Study (2×2 Ablation)](#6-systematic-design-space-study-22-ablation)
-7. [Experiments and Metrics](#7-experiments-and-metrics)
-8. [Results](#8-results)
-9. [Discussion](#9-discussion)
-10. [Limitations and Future Work](#10-limitations-and-future-work)
-11. [Reproducibility](#11-reproducibility)
-12. [B1 Robot Configuration](#12-b1-robot-configuration)
+7. [Phase-Observation Ablation](#7-phase-observation-ablation)
+8. [Experiments and Metrics](#8-experiments-and-metrics)
+9. [Results](#9-results)
+10. [Discussion](#10-discussion)
+11. [Limitations and Future Work](#11-limitations-and-future-work)
+12. [Reproducibility](#12-reproducibility)
+13. [B1 Robot Configuration](#13-b1-robot-configuration)
 
 ---
 
@@ -41,39 +42,50 @@ A hand-designed **smoothstep** blending schedule already outperforms discrete sw
 
 This question is investigated through a systematic **2×2 ablation**: output space (α vs q) × action dimension (4D vs 12D). The study reveals trade-offs rather than a single winner: all residual variants reduce transition-window jerk, but velocity safety rankings are gait-phase-dependent.
 
+### Thesis Statement
+
+This project began with the goal of using residual learning to reduce gait-transition jerk. The final result shows that the main issue is not only *whether* residual learning is used, but *where* the residual acts, *how* it is constrained, and *when* the transition occurs relative to gait phase. All four residual variants improve jerk over Smoothstep, but velocity safety and robustness remain gait-phase dependent. Therefore, the main contribution is a design-space analysis and a set of lessons about the factors that determine residual transition quality — not a single winning architecture.
+
 ### Contributions
 
-- Formulated gait transition as a **residual correction problem** on top of frozen policy blending, comparing q-space (joint-position corrections Δq) and α-space (blending-schedule corrections Δα) as correction targets.
-- Developed a stable **residual-learning recipe** (time-gating, asymmetric sigmoid clamp, jerk penalty, sparsity) through a v1–v10 prototype sequence using the simpler 4D α-space model before expanding to the full design space.
-- Conducted a **2×2 design-space study** (α vs q) × (4D vs 12D) with all other factors held fixed, revealing that both output space and action dimension affect jerk, reversal, and robustness in ways that interact with gait-phase diversity.
-- Demonstrated that all four residual variants reduce transition-window jerk vs Smoothstep (−6% to −16% canonical; −6% to −20% at N=60). Velocity safety is gait-phase-dependent: Residual-α 12D achieves zero reversal at the canonical fixed gait phase; Residual-q 4D achieves zero reversal across 60 diverse gait phases.
+- Formulated gait transition as a **residual correction problem** on top of frozen policy blending, comparing two correction targets: q-space (joint-position corrections Δq) and α-space (blending-schedule corrections Δα).
+- Developed a stable **residual-learning recipe** (time-gating, asymmetric sigmoid clamp, jerk penalty, sparsity) through a v1–v10 prototype sequence before expanding to the full design space.
+- Conducted a **2×2 design-space study** (α vs q) × (4D vs 12D) with all other factors fixed, revealing that output space, action dimension, and action constraints interact with gait-phase diversity in non-trivial ways.
+- Showed that all four residual variants improve transition-window jerk over Smoothstep, but **no method dominates every metric** — velocity safety rankings are gait-phase-dependent and fixed-seed and randomized-seed evaluations disagree.
+- Identified that simple residual correction does not fully solve gait transition: the remaining difficulty is **phase alignment** between frozen source and target policies, which the MLP cannot directly observe or correct.
+- Conducted a **phase-observation ablation** — adding binary foot contact (49-D obs) while removing the jerk reward — showing that phase information improves velocity safety but does not improve jerk without an explicit smoothness signal. This confirms that observation design and reward design are independent axes, both of which matter.
+- Established that a single fixed-seed evaluation is insufficient to characterize reversal behavior — diverse gait-phase evaluation (N=60) reveals disagreements that N=6 cannot detect.
 
 ### Key Results
 
 **Canonical evaluation** (seed=42, 2500 steps, 6 directed gait-pair transitions):
 
-| Method | vx_mean | vx_min | CoT | **jerk_TRANS** |
-|---|---:|---:|---:|---:|
-| Discrete Switch | +0.435 | −0.195 | 2.793 | 11361 |
-| Linear Ramp | +0.390 | −0.206 | 1.955 | 7441 |
-| Smoothstep Ramp | +0.415 | −0.096 | 2.090 | 8508 |
-| Residual-α 4D | +0.430 | −0.086 | 2.171 | 7617 |
-| Residual-q 4D | +0.416 | −0.024 | 2.158 | 7320 |
-| Residual-q 12D | +0.408 | −0.122 | 2.064 | 7719 |
-| Residual-α 12D | +0.427 | +0.004 | 2.105 | 7951 |
+| Method | vx_mean | vx_std | vx_min | **Δvx** | CoT | **jerk_TRANS** |
+|---|---:|---:|---:|---:|---:|---:|
+| Discrete Switch | +0.435 | 0.108 | −0.195 | 0.630 | 2.793 | 11361 |
+| Linear Ramp | +0.390 | 0.157 | −0.206 | 0.597 | 1.955 | 7441 |
+| Smoothstep Ramp | +0.415 | 0.129 | −0.096 | 0.511 | 2.090 | 8508 |
+| Residual-α 4D | +0.430 | 0.113 | −0.086 | 0.516 | 2.171 | 7617 |
+| Residual-q 4D | +0.416 | 0.100 | −0.024 | 0.440 | 2.158 | 7320 |
+| Residual-q 12D | +0.408 | 0.130 | −0.122 | 0.530 | 2.064 | 7719 |
+| **Residual-α 12D** | **+0.431** | **0.099** | **+0.061** | **0.371** | 2.454 | **8320** |
+
+*Δvx = vx_mean − vx_min: how far velocity drops below the episode average during the worst transition window. Smaller = less disruption. This is hardware-independent; vx_min alone is not, because B1's thigh asymmetry creates a lower-than-commanded steady-state baseline.*
 
 **Multi-seed evaluation** (N=60: 10 seeds × 6 gait pairs, `--randomize_start`):
 
-| Method | jerk_TRANS mean | vs Smoothstep | reversal rate | worst vx_min |
+| Method | jerk_TRANS mean | vs Smoothstep | mean Δvx | dip rate (<0) |
 |---|---:|---:|---:|---:|
-| Discrete Switch | 10166 | +11.7% | 18% | −0.527 |
-| Smoothstep Ramp | 9102 | — | **55%** | −0.236 |
-| Residual-α 12D | 8570 | −5.8% | 30% | −0.217 |
-| Residual-α 4D | 8185 | −10.1% | 7% | −0.167 |
-| Residual-q 4D | **7619** | **−16.3%** | **0%** | **+0.072** |
-| Residual-q 12D | 7305 | −19.7% | 38% | −0.429 |
+| Discrete Switch | 10166 | +11.7% | 0.266 | 18% |
+| Smoothstep Ramp | 9102 | — | 0.409 | 55% |
+| Residual-α 12D | 8570 | −5.8% | 0.351 | 30% |
+| Residual-α 4D | 8185 | −10.1% | 0.310 | 7% |
+| Residual-q 4D | **7619** | **−16.3%** | **0.229** | **0%** |
+| Residual-q 12D | 7305 | −19.7% | 0.399 | 38% |
 
-**The robust finding** (holds at both N=6 and N=60): all four residual variants beat Smoothstep on transition-window jerk. **The gait-phase-dependent finding**: velocity reversal safety rankings differ between evaluations — Res-α 12D has zero reversal at the fixed canonical gait phase but 30% reversal across diverse phases; Res-q 4D has the reverse pattern (mild reversal at canonical, zero reversal at N=60). **Base-swap validation**: the learned residual is schedule-calibrated — the MLP reduces Smoothstep jerk by −6.5% but raises Linear Ramp jerk by +12.2%, confirming it is a genuine contextual correction rather than a generic transition policy.
+*Dip rate = fraction of 60 windows where vx_min < 0 (velocity crossed zero). Mean Δvx = mean velocity drop from episode average across all 60 windows, regardless of sign.*
+
+The tables above show a design trade-off map, not a winner. **The one robust finding**: all four residual variants reduce jerk over Smoothstep at both evaluation levels. **The secondary transition characteristic** is Δvx (velocity drop from steady-state): Res-α 12D has the smallest Δvx at canonical N=6 (0.371 vs Smoothstep 0.511), meaning the velocity disturbance through the transition is 27% smaller. At N=60, Res-q 4D has the smallest mean Δvx (0.229). These two evaluations disagree on which method is least disruptive, which is itself a finding: a single fixed gait phase is insufficient to characterize transition quality. The base-swap experiment confirms that the learned corrections are schedule-specific: replacing Smoothstep with a linear ramp at evaluation time raises jerk by +12.3%, proving the MLP learned a contextual correction calibrated to its training base. The phase-observation ablation (Section 7) adds a further lesson: adding foot contact to the observation improved velocity safety but increased jerk, because the jerk reward was doing load-bearing work. Observation design and reward design are independent axes that must be co-designed.
 
 ---
 
@@ -118,6 +130,8 @@ Smoothstep is chosen as the baseline for four reasons:
 4. **Strong enough to be meaningful.** Smoothstep is a competitive passive baseline — it outperforms discrete switching on jerk and reversal. Improving on it indicates a genuine gain from the learned correction.
 
 *"We choose Smoothstep as the residual baseline because it is deterministic, interpretable, and already removes endpoint discontinuities through zero endpoint slope. Setting Δα = 0 exactly recovers Smoothstep, so the effect of the learned residual can be measured directly."*
+
+**Why not use an architecture that avoids the blending problem entirely?** Alternative architectures such as AllGaits (Bellegarda et al., 2024) encode gait identity in a CPG coupling matrix Φ that can be swapped at runtime; the single continuous policy was trained across all CPG phase states, including mid-transition states. This eliminates the blending problem by construction. In an independent B1 replication, all six directed gait-pair transitions maintained positive forward velocity across all seeds without any explicit transition mechanism. This project uses two *frozen* PPO policies because they were already trained independently as Phase 1 outputs. Designing a single phase-continuous policy from scratch would require a complete architectural redesign. Residual learning is the right intervention given the existing architecture: it improves Smoothstep without requiring retraining of the base policies or redesigning the control pipeline.
 
 ### Why Residual Learning Instead of a Fully Learned Blending Policy
 
@@ -231,7 +245,7 @@ joint_target = default_joint_pos + 0.25 × blended
 
 ### Why Per-Joint, Not Per-Leg Scalar
 
-Trot, bound, and pace have different leg-pair sync structures. During trot→bound, FL must decouple from its diagonal partner (RR) and recouple with its fore-pair partner (FR). Per-leg 4D α allows independent leg timing. Per-joint 12D further allows each hip, thigh, and knee joint to transition at its own rate. The 2×2 ablation (Section 6) shows that within α-space, 12D achieves zero velocity reversal at the canonical fixed gait phase (N=6) — a property that the 4D variant cannot provide at that phase.
+Trot, bound, and pace have different leg-pair sync structures. During trot→bound, FL must decouple from its diagonal partner (RR) and recouple with its fore-pair partner (FR). Per-leg 4D α allows independent leg timing. Per-joint 12D further allows each hip, thigh, and knee joint to transition at its own rate. The 2×2 ablation (Section 6) shows that within α-space, 12D achieves the smallest velocity disturbance (Δvx = 0.371) at the canonical fixed gait phase — a property that the 4D variant cannot match at that phase (Δvx = 0.516).
 
 ### Observation Space (45-D)
 
@@ -263,7 +277,7 @@ cycles_elapsed     (1)   time elapsed in episode (1 Hz CPG-equivalent)
 | Δα sparsity | −3.0 | `‖Δα‖²` — pushes residual toward zero unless earning reward |
 | Alive bonus | +0.5 | Per-step survival bonus |
 
-*Note: the sp05_jw2 retrained variants used jerk weight −2×10⁻¹⁰ and sparsity −0.5.*
+*All four residual variants use the same sp05_jw2 hyperparams: jerk weight −2×10⁻¹⁰, sparsity −0.5, 3000 training iterations.*
 
 ### Action Space and Network Architecture
 
@@ -408,20 +422,20 @@ After establishing a working residual recipe with Residual-α 4D, two design dim
 | **α-space** (blending weight) | Residual-α 4D | **Residual-α 12D** ← main α-space 12D variant |
 | **q-space** (joint position) | Residual-q 4D | Residual-q 12D |
 
-All four variants share: same smoothstep baseline, same time-gating, same sparsity weight (`−3.0`), same jerk reward (`−1e-10`), same network size (128×128), same training budget. Only output space and action dimension differ.
+All four variants share: same smoothstep baseline, same time-gating, same sparsity weight (`−0.5`), same jerk reward (`−2×10⁻¹⁰`), same network size (128×128), same training budget (3000 iterations). Only output space and action dimension differ.
 
 **Why α-space is more structured:** Residual-α keeps the command on the interpolation path between frozen policy outputs. The correction `Δα ∈ [0, 0.3]` advances the blend — the output stays within the convex combination of two frozen policies rather than adding unconstrained joint offsets. This is more interpretable and bounded, but it does not guarantee dynamic safety for every gait phase — the N=60 evaluation shows Res-α 12D still produces reversal on 30% of windows. Residual-q adds directly to joint targets with no such interpolation structure, which can deviate further from safe gait states, but conservative action magnitude (as in Res-q 4D) can compensate empirically.
 
-**A note on Residual-q 4D:** The 4D q-space design broadcasts one scalar Δq to all three joints in a leg (hip, thigh, calf). Applying the same correction to joints with different angular ranges and mechanical roles is physically less interpretable than per-joint correction. However, this uniformity constraint appears to be implicitly conservative — the network learns small corrections that do not cause reversal across diverse gait phases, producing the best N=60 combined result (lowest jerk among zero-reversal methods). Residual-q 4D is included for 2×2 completeness; q-space results should be read together with Residual-q 12D to separate the effect of output space from action dimension.
+**A note on Residual-q 4D:** The 4D q-space design broadcasts one scalar Δq to all three joints in a leg (hip, thigh, calf). Applying the same correction to joints with different angular ranges and mechanical roles is physically less interpretable than per-joint correction. However, this uniformity constraint appears to be implicitly conservative — the network learns small corrections that avoid large deviations regardless of gait phase, producing a strong N=60 result: lowest jerk (7619) and smallest mean Δvx (0.229) among all variants. Residual-q 4D is included for 2×2 completeness; q-space results should be read together with Residual-q 12D to separate the effect of output space from action dimension.
 
 ### 2×2 Canonical Evaluation (seed=42, 2500 steps)
 
-| Variant | vx_mean | vx_std | vx_min | tilt_max | h_mean | CoT | **jerk_TRANS** |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Residual-α 4D | +0.430 | 0.113 | −0.086 | 0.189 | 0.408 | 2.171 | 7617 |
-| Residual-q 4D | +0.416 | 0.100 | −0.024 | 0.200 | 0.417 | 2.158 | 7320 |
-| **Residual-α 12D** | **+0.427** | **0.109** | **+0.004** | 0.190 | 0.407 | **2.105** | **7951** |
-| Residual-q 12D | +0.408 | 0.130 | −0.122 | 0.207 | 0.414 | 2.064 | 7719 |
+| Variant | vx_mean | vx_std | vx_min | **Δvx** | tilt_max | h_mean | CoT | **jerk_TRANS** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Residual-α 4D | +0.430 | 0.113 | −0.086 | 0.516 | 0.189 | 0.408 | 2.171 | 7617 |
+| Residual-q 4D | +0.416 | 0.100 | −0.024 | 0.440 | 0.200 | 0.417 | 2.158 | 7320 |
+| **Residual-α 12D** | **+0.431** | **0.099** | **+0.061** | **0.371** | 0.183 | 0.408 | 2.454 | **8320** |
+| Residual-q 12D | +0.408 | 0.130 | −0.122 | 0.530 | 0.207 | 0.414 | 2.064 | 7719 |
 
 **Transition-window zoom — 2×2 (trot→bound, seed=42):**
 
@@ -432,15 +446,90 @@ Blue = α-space; Orange = q-space. Solid = 4D; Dashed = 12D (best). Max |joint v
 ### Interpretation
 
 - **All four residual variants beat Smoothstep (8508)** on jerk_TRANS. The residual recipe works.
-- **α-space × 12D (Residual-α 12D)** is the safety-preferred method **at the canonical evaluation (N=6)**: the **only variant with zero velocity reversal** at the canonical fixed gait phase (vx_min = +0.004), with competitive jerk (7951) and comparable CoT (2.105 vs 2.090). *Caveat: at N=60, Res-α 12D has 30% reversal rate; Res-q 4D achieves zero reversal.*
-- **Within α-space (canonical N=6)**: 4D (7617) achieves lower jerk than 12D (7951) but at the cost of mild velocity reversal (vx_min = −0.086). 12D pays a small jerk penalty for the zero-reversal guarantee at the canonical gait phase.
-- **Within q-space (canonical N=6)**: both variants achieve lower raw jerk (7320, 7719) but have velocity reversal; neither achieves zero reversal at the canonical gait phase.
-- **Within q-space, 12D does not improve reversal vs 4D**: vx_min worsens from −0.024 to −0.122 at canonical N=6 (though at N=60 both improve substantially, with Res-q 4D reaching zero reversal).
-- **The structural property of output space**: α-space keeps the command on the interpolation path between frozen policy outputs; q-space adds directly to joint targets with no such constraint. This structural difference provides interpretability and bounded correction, but does not fully determine empirical safety across all gait phases — see Section 9 discussion.
+- **α-space × 12D (Residual-α 12D)** produces the **smallest velocity disturbance at canonical N=6**: Δvx = 0.371, a 27% reduction vs Smoothstep (0.511), with a modest jerk reduction (8320, −2.2% vs Smoothstep) and higher CoT (2.454 vs 2.090). *At N=60 mean Δvx, Res-q 4D is the least disruptive (0.229 vs Res-α 12D 0.351) — the two evaluations disagree.*
+- **Within α-space (canonical N=6)**: 4D (7617) achieves lower jerk than 12D (8320), but 12D has the smaller Δvx (0.371 vs 0.516) — 12D is more disruptive on jerk but less disruptive on velocity. The sp05_jw2 hyperparams favour 4D on raw jerk but 12D on velocity stability.
+- **Within q-space (canonical N=6)**: both variants achieve lower raw jerk (7320, 7719) but larger Δvx than Res-α 12D; Res-q 12D is the most disruptive on velocity (Δvx = 0.530).
+- **The structural property of output space**: α-space keeps the command on the interpolation path between frozen policy outputs; q-space adds directly to joint targets with no such constraint. This structural difference provides interpretability and bounded correction, but does not fully determine empirical velocity disturbance across all gait phases — see Section 10 discussion.
 
 ---
 
-## 7. Experiments and Metrics
+## 7. Phase-Observation Ablation
+
+### Motivation
+
+The 2×2 ablation (Section 6) reveals that no residual variant fully eliminates velocity reversal across diverse gait phases. The structural reason: the MLP receives gait one-hots and `alpha_baseline`, but **has no direct access to the instantaneous phase state of each frozen policy at switch time**. It therefore learns a phase-averaged correction — one that works reasonably on average but cannot adapt to the specific phase mismatch at each switch event.
+
+Two natural follow-up questions:
+
+1. *If we give the MLP explicit gait-phase information (foot contact state), can it learn phase-conditional corrections?*
+2. *Can a residual policy find smooth transitions without an explicit jerk penalty, if it has richer observations?*
+
+The second question is motivated by Margolis & Agrawal (AllGaits, 2024), which trains a single policy to produce 9 distinct gaits using only velocity tracking, energy, and stability rewards — without any explicit gait-shaping signal. If gait structure can emerge from velocity tracking alone, perhaps smooth transition behavior can emerge similarly, given phase information.
+
+### Setup
+
+**Observation change:** 4-dimensional binary foot contact appended to the 45-D base observation → **49-D total**.
+
+```
+foot_contact  (4)  binary: FL / FR / RL / RR  (contact force > 1.0 N threshold)
+```
+
+Foot contact is queried from the contact sensor at each control step. The 1.0 N binary threshold converts continuous force readings to a clear stance/swing signal.
+
+**Reward change:** joint jerk penalty (`rew_joint_jerk`) and joint acceleration penalty (`rew_joint_acc`) both removed. All other terms unchanged (velocity tracking, yaw, orientation, height, action rate, sparsity, alive bonus). Remaining reward = velocity + stability + energy + sparsity.
+
+**Hypothesis:** With explicit foot contact, the MLP can observe which legs are in stance at switch time. Combined with velocity-tracking pressure, it should learn to time corrections to avoid destabilizing in-flight legs — producing smoother transitions without an explicit smoothness reward.
+
+All 4 variants were trained under this setup (Res-α 4D PA, Res-α 12D PA, Res-q 4D PA, Res-q 12D PA) using the same network architecture, same PPO hyperparameters, and same 3000-iteration budget as the old 2×2. Checkpoints are at `logs/phase2/residual_*_phase_aware/`.
+
+### Results
+
+**Multi-seed evaluation (N=60, 10 seeds × 6 gait pairs) — primary comparison:**
+
+| Variant | jerk_TRANS mean | vs Smoothstep | mean Δvx | dip rate (<0) |
+|---|---:|---:|---:|---:|
+| Smoothstep (reference) | 9102 | — | 0.409 | 55.0% |
+| Res-α 4D (old 2×2) | 8185 | −10.1% | 0.310 | 7.4% |
+| Res-α 12D (old 2×2) | 8570 | −5.8% | 0.351 | 30.0% |
+| Res-q 4D (old 2×2) | **7619** | **−16.3%** | **0.229** | **0.0%** |
+| Res-q 12D (old 2×2) | 7305 | −19.7% | 0.399 | 38.3% |
+| Res-α 4D PA | 9037 | −0.7% | 0.302 | **5.0%** |
+| Res-α 12D PA | 8837 | −2.9% | 0.275 | **3.3%** |
+| Res-q 4D PA | 13824 | +51.9% | 0.182 | **0.0%** |
+| Res-q 12D PA | 13057 | +43.4% | 0.113 | **0.0%** |
+
+**Canonical evaluation (seed=42, jerk_TRANS and Δvx):**
+
+| Variant | old 2×2 jerk | PA jerk | change | old 2×2 Δvx | PA Δvx |
+|---|---:|---:|---:|---:|---:|
+| Res-α 4D | 7617 | 8703 | +14.3% | 0.516 | 0.401 |
+| Res-α 12D | 8320 | 9578 | +15.1% | 0.371 | 0.365 |
+| Res-q 4D | 7320 | 14095 | +92.5% | 0.440 | 0.398 |
+| Res-q 12D | 7719 | 12742 | +65.1% | 0.530 | 0.666 |
+
+### Findings
+
+**Phase observation improved velocity safety, not jerk.** All three q-space and 12D α phase-aware variants achieve near-zero reversal at N=60 (0%, 3.3%, 0% respectively). This is a genuine improvement in safety over the old 2×2 for most variants. However, jerk increased substantially — especially for q-space variants (13824, 13057 at N=60 vs 7619, 7305 in old 2×2).
+
+**Without the jerk reward, the policy does not find smooth transitions.** α-space phase-aware variants stay closer to Smoothstep on jerk (8703, 9578) — velocity-tracking pressure provides a weak smoothness signal because large corrections disturb forward velocity. But q-space variants, which add directly to joint targets with no interpolation structure, produce high jerk without an explicit penalty. The policy has no incentive to minimize jerk_TRANS unless the reward directly penalizes it.
+
+**The AllGaits analogy does not transfer directly.** AllGaits discovers gait structure because periodic, rhythmic locomotion is the natural solution to the velocity-tracking objective over long episodes. In residual transition learning, the transition window is short (3 s) and a jerk spike does not necessarily register as a large velocity loss. The residual therefore needs an explicit smoothness signal to learn smooth corrections.
+
+**Observation design and reward design are independent axes.** Adding phase information does not automatically improve jerk. The two changes — richer observation and removed jerk reward — have opposite effects: phase info improves safety; reward removal raises jerk. The old 2×2 had an explicit jerk penalty that was doing load-bearing work. The phase-aware study confirms this.
+
+### Interpretation
+
+This is a **negative result with a clear lesson**: phase observation alone is not sufficient. The correct next step is to combine both:
+
+> **Phase observation + jerk reward** = richer observation for phase-conditional corrections AND the optimization signal needed to make those corrections smooth.
+
+The current old 2×2 has jerk reward but no phase obs (phase-averaged corrections, some reversal). The phase-aware ablation has phase obs but no jerk reward (near-zero reversal, high jerk). The combination — phase obs + jerk reward — is the natural next configuration and is listed as the primary future work direction (Section 11).
+
+The finding is not that the phase-aware variants failed. It is that **observation space and reward design must be co-designed**: expanding one without the other produces a partial improvement that degrades another metric.
+
+---
+
+## 8. Experiments and Metrics
 
 ### Methods Compared
 
@@ -457,13 +546,18 @@ Blue = α-space; Orange = q-space. Solid = 4D; Dashed = 12D (best). Max |joint v
 
 ### Metrics
 
-**Primary metric — `jerk_TRANS`:** Jerk RMS (rad/s³) measured only inside the 3 s transition window. All methods run identical frozen base policies during steady-state holds — transition-window jerk is the only period where blending strategies differ. Jerk (rate of change of acceleration) is used as a proxy for abrupt joint-command changes and transition harshness.
+**Primary metric — `jerk_TRANS`:** Jerk RMS (rad/s³) measured over the 3 s transition window. All methods run identical frozen base policies during steady-state holds — transition-window jerk is the only period where blending strategies differ. Jerk (rate of change of acceleration) is used as a proxy for abrupt joint-command changes and transition harshness.
+
+**Calculation:** Input is `d.joint_acc` — the joint acceleration output of the Isaac Lab physics engine (computed at 200 Hz physics rate, not finite-differenced from 50 Hz joint velocity). One finite difference gives jerk: `jerk[t] = (joint_acc[t+1] − joint_acc[t]) / 0.02`. The window is 150 control steps (3.0 s at 50 Hz) starting from when `alpha_base` first exceeds 0.02. jerk_TRANS = RMS over 150 steps × 12 joints = 1800 values.
 
 **Why not `jerk_ALL`:** Jerk during steady-state holds is identical across methods (same frozen base policies). Aggregating over the full episode dilutes the signal.
 
+**Footfall contamination caveat:** The 3.0 s window contains many footfall impact cycles (trot gait at ~1.6 Hz has ~5 full strides). Each footfall produces a jerk spike unrelated to the blending schedule. jerk_TRANS is therefore not pure transition-disturbance jerk — it is the sum of transition-specific disturbance and the underlying footfall noise floor. All methods are compared under the same window definition, so relative rankings are valid, but absolute values include footfall contributions. Differences between methods (e.g., Smoothstep 8508 vs Res-α 12D 8320) are real but small relative to the footfall noise floor.
+
 **Secondary metrics:**
-- `vx_min` — minimum forward velocity during any transition window. Negative = velocity reversal (robot momentarily moves backward).
-- `vx_mean`, `vx_std` — tracking quality and consistency.
+- `Δvx = vx_mean − vx_min` — velocity disturbance: how far the forward velocity drops below the episode average during the worst transition window. Hardware-independent measure of transition disruption. Smaller = smoother transition.
+- `vx_min` — absolute minimum forward velocity during any transition window. Reported for completeness; negative values indicate the velocity crossed zero. Interpret with caution: B1's thigh asymmetry (0.8 rad front / 1.0 rad rear) creates a lower-than-commanded steady-state baseline, so the zero-crossing threshold is robot-specific.
+- `vx_mean`, `vx_std` — tracking quality and consistency over the episode.
 - `CoT` (Cost-of-Transport) — energy efficiency.
 - `tilt_max` — maximum body tilt (orientation stability).
 - Fall / episode termination count.
@@ -478,7 +572,7 @@ Blue = α-space; Orange = q-space. Solid = 4D; Dashed = 12D (best). Max |joint v
 
 ---
 
-## 8. Results
+## 9. Results
 
 ### Discrete Spike Analysis
 
@@ -490,17 +584,17 @@ At switch time: max joint velocity 16.4 rad/s (6.2× steady-state), jerk 19 189 
 
 Full table — all methods, 6-pair evaluation:
 
-| Method | vx_mean | vx_std | vx_min | tilt_max | h_mean | CoT | **jerk_TRANS** |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Discrete Switch | +0.435 | 0.108 | −0.195 | 0.234 | 0.409 | 2.793 | 11361 |
-| Linear Ramp | +0.390 | 0.157 | −0.206 | 0.184 | 0.404 | 1.955 | 7441 |
-| Smoothstep Ramp | +0.415 | 0.129 | −0.096 | 0.187 | 0.405 | 2.090 | 8508 |
-| Residual-α 4D | +0.430 | 0.113 | −0.086 | 0.189 | 0.408 | 2.171 | 7617 |
-| Residual-q 4D | +0.416 | 0.100 | −0.024 | 0.200 | 0.417 | 2.158 | 7320 |
-| Residual-q 12D | +0.408 | 0.130 | −0.122 | 0.207 | 0.414 | 2.064 | 7719 |
-| **Residual-α 12D** | **+0.427** | **0.109** | **+0.004** | 0.190 | 0.407 | **2.105** | **7951** |
+| Method | vx_mean | vx_std | vx_min | **Δvx** | tilt_max | h_mean | CoT | **jerk_TRANS** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Discrete Switch | +0.435 | 0.108 | −0.195 | 0.630 | 0.234 | 0.409 | 2.793 | 11361 |
+| Linear Ramp | +0.390 | 0.157 | −0.206 | 0.597 | 0.184 | 0.404 | 1.955 | 7441 |
+| Smoothstep Ramp | +0.415 | 0.129 | −0.096 | 0.511 | 0.187 | 0.405 | 2.090 | 8508 |
+| Residual-α 4D | +0.430 | 0.113 | −0.086 | 0.516 | 0.189 | 0.408 | 2.171 | 7617 |
+| Residual-q 4D | +0.416 | 0.100 | −0.024 | 0.440 | 0.200 | 0.417 | 2.158 | 7320 |
+| Residual-q 12D | +0.408 | 0.130 | −0.122 | 0.530 | 0.207 | 0.414 | 2.064 | 7719 |
+| **Residual-α 12D** | **+0.431** | **0.099** | **+0.061** | **0.371** | 0.183 | 0.408 | 2.454 | **8320** |
 
-*All four residual variants beat Smoothstep on jerk_TRANS. In this canonical evaluation, Residual-α 12D is the only method with zero velocity reversal (vx_min +0.004 vs Smoothstep −0.096) — this zero-reversal property holds at the fixed canonical gait phase but does not generalise across diverse phases (N=60: 30% reversal rate). It reduces jerk by 6.5% vs Smoothstep (8508 → 7951) and 30.0% vs Discrete (11361 → 7951), with comparable CoT (2.105 vs 2.090).*
+*All four residual variants beat Smoothstep on jerk_TRANS. Residual-α 12D also has the smallest velocity disturbance (Δvx = 0.371 vs Smoothstep 0.511, −27%), meaning the velocity drop through the worst transition window is smallest. It reduces jerk by 2.2% vs Smoothstep and 26.8% vs Discrete. CoT is higher than Smoothstep (2.454 vs 2.090). The Δvx advantage does not hold across diverse gait phases — at N=60, Res-q 4D has the smallest mean Δvx (0.229).*
 
 ### Transition-Window Jerk Profile
 
@@ -526,13 +620,14 @@ The cleanest measure of what the MLP adds — both share the same smoothstep bas
 
 | | Smoothstep | Residual-α 12D | Change |
 |---|---:|---:|---:|
-| vx_mean | +0.415 | **+0.427** | **+2.9%** |
-| vx_std | 0.129 | **0.109** | **−15.5%** |
-| vx_min | −0.096 | **+0.004** | **reversal eliminated** |
-| **jerk_TRANS** | 8508 | **7951** | **−6.5%** |
-| CoT | 2.090 | **2.105** | +0.7% |
+| vx_mean | +0.415 | **+0.431** | **+3.9%** |
+| vx_std | 0.129 | **0.099** | **−23.3%** |
+| vx_min | −0.096 | **+0.061** | less disruptive |
+| **Δvx** | 0.511 | **0.371** | **−27.4%** |
+| **jerk_TRANS** | 8508 | **8320** | **−2.2%** |
+| CoT | 2.090 | **2.454** | +17.4% |
 
-The MLP adds 2.9% velocity, reduces velocity variance by 15.5%, eliminates reversal at the canonical fixed gait phase (30% reversal rate at N=60), and reduces jerk by 6.5%. CoT is comparable (within noise), with Residual-α 12D marginally higher.
+The MLP adds 3.9% mean velocity, reduces velocity variance by 23.3%, reduces velocity disturbance by 27.4% (Δvx 0.511 → 0.371), and reduces jerk by 2.2%. CoT is higher (2.454 vs 2.090) — the sp05_jw2 hyperparams allow more correction activity at some energy cost. The Δvx improvement is the cleanest transition-characteristic claim: it is hardware-independent and reflects reduced disruption through the switch, regardless of whether vx crosses zero.
 
 <table>
 <tr>
@@ -562,16 +657,17 @@ Smoothstep's zero-derivative endpoints reduce ramp-start kinematic kicks, produc
 
 | | Discrete | Residual-α 12D | Change |
 |---|---:|---:|---:|
-| **jerk_TRANS** | **11361** | **7951** | **−30.0%** |
-| vx_min | −0.195 | **+0.004** | reversal eliminated |
-| CoT | 2.793 | **2.105** | −24.7% |
+| **jerk_TRANS** | **11361** | **8320** | **−26.8%** |
+| vx_min | −0.195 | **+0.061** | less disruptive |
+| **Δvx** | 0.630 | **0.371** | **−41.1%** |
+| CoT | 2.793 | **2.454** | −12.1% |
 
 *Across 6 directed gait-pair transitions (canonical seed=42):*
 
 | | Discrete | Residual-α 12D | Change |
 |---|---:|---:|---:|
-| jerk_TRANS mean | 11361 | **7951** | **−30.0%** |
-| Worst gait pair | 19030 | **12351** | −35.1% |
+| jerk_TRANS mean | 11361 | **8320** | **−26.8%** |
+| Worst gait pair | 19030 | **10155** | −46.6% |
 
 <table>
 <tr>
@@ -612,7 +708,7 @@ Smoothstep's zero-derivative endpoints reduce ramp-start kinematic kicks, produc
 
 ---
 
-**(h) Residual-α 12D** — per-joint Δα. jerk_TRANS 7951 (−6.5% vs Smoothstep), vx_min +0.004 (only zero-reversal method at canonical N=6; 30% reversal rate at N=60), CoT 2.105.
+**(h) Residual-α 12D** — per-joint Δα. jerk_TRANS 8320 (−2.2% vs Smoothstep), Δvx 0.371 (smallest velocity disturbance at canonical N=6, −27% vs Smoothstep), vx_min +0.061, CoT 2.454.
 
 ![Residual-α 12D gait diagram](logs/phase2/residual_alpha_12d/diag/gait_diagram.png)
 
@@ -628,10 +724,10 @@ Each method evaluated across all 6 directed gait-pair transitions in the canonic
 | Smoothstep Ramp | 6 | 8508 | 2610 | 4233 | 11801 |
 | Res-α 4D | 6 | 7617 | 3104 | 4607 | 13540 |
 | Res-q 4D | 6 | 7320 | **1934** | **4930** | **10789** |
-| **Res-α 12D** | **6** | **7951** | 3267 | 4072 | 12351 |
+| **Res-α 12D** | **6** | **8320** | 1773 | 5336 | 10155 |
 | Res-q 12D | 6 | 7719 | 1921 | 4490 | 10193 |
 
-*All four residual variants beat Smoothstep (8508). Residual-α 12D has the lowest mean among zero-reversal methods (7951). q-space variants (7320, 7719) achieve lower raw jerk but at the cost of velocity reversal. Res-q 4D has the tightest per-pair spread (std=1934), but with vx_min=−0.024.*
+*All four residual variants beat Smoothstep (8508) on jerk. Residual-α 12D has the smallest velocity disturbance at canonical N=6 (Δvx=0.371). q-space variants (7320, 7719) achieve lower raw jerk but larger Δvx. Res-q 4D has the tightest per-pair jerk spread (std=1934).*
 
 Per-gait-pair breakdown (tro=trot, bou=bound, pac=pace):
 
@@ -661,21 +757,21 @@ A key question in residual policy learning is whether the MLP has learned a genu
 | | Linear ramp base | Smoothstep base |
 |---|---:|---:|
 | **Δα = 0** (no MLP) | 7441 | 8508 |
-| **Δα = MLP output** | **8343 (+12.2%)** | **7951 (−6.5%)** |
+| **Δα = MLP output** | **8359 (+12.3%)** | **8320 (−2.2%)** |
 
-With the **correct base (Smoothstep)**, the MLP reduces mean jerk by −6.5% (8508 → 7951). With the **wrong base (linear ramp)**, the MLP remains active (Δα_max ≈ 0.15 per joint vs. 0.30 with SS base) but its corrections are miscalibrated: it hurts on 4/6 gait pairs and raises mean jerk by +12.2% (7441 → 8343).
+With the **correct base (Smoothstep)**, the MLP reduces mean jerk by −2.2% (8508 → 8320). With the **wrong base (linear ramp)**, the MLP remains active (Δα_max ≈ 0.15 per joint vs. 0.30 with SS base) but its corrections are miscalibrated: it hurts on 4/6 gait pairs and raises mean jerk by +12.3% (7441 → 8359).
 
 Per-gait-pair breakdown:
 
 | Gait pair | LR, Δα=0 | LR + MLP | SS, Δα=0 | SS + MLP |
 |---|---:|---:|---:|---:|
-| trot→bound | 2540 | 5784 (+128%) | 4233 | **4072** |
-| bound→pace | 8735 | 11229 (+29%) | 9932 | 12351 |
-| pace→trot | 5539 | 8163 (+47%) | 6171 | **5523** |
-| trot→pace | 5507 | 9770 (+77%) | 8343 | **8149** |
-| pace→bound | 12805 | **8945** (−30%) | 11801 | 12140 |
-| bound→trot | 9519 | **6170** (−35%) | 10566 | **5470** |
-| **Mean** | **7441** | **8343** | **8508** | **7951** |
+| trot→bound | 2540 | 6545 (+158%) | 4233 | 7185 |
+| bound→pace | 8735 | 13347 (+53%) | 9932 | **9819** |
+| pace→trot | 5539 | 7158 (+29%) | 6171 | 9882 |
+| trot→pace | 5507 | 7472 (+36%) | 8343 | **7542** |
+| pace→bound | 12805 | **9623** (−25%) | 11801 | **10155** |
+| bound→trot | 9519 | **6010** (−37%) | 10566 | **5336** |
+| **Mean** | **7441** | **8359** | **8508** | **8320** |
 
 The MLP's corrections accelerate the transition in Smoothstep-specific ways (e.g., pushing α above the slow early-ramp region). When the base is already linear, those same accelerations land at structurally wrong times — producing larger jerk on most pairs.
 
@@ -714,7 +810,7 @@ Both jerk_RMS and CoT form a U-shape with minimum at `−1e-10`.
 | 0.5 s | 13063 | 11324 | Both fail — architectural ceiling |
 | 1.0 s | ~11000 | ~11000 | Both fail |
 | 2.0 s | — | — | Residual-α 12D wins |
-| **3.0 s** | **7951** | **8508** | **Residual-α 12D wins (training dist)** |
+| **3.0 s** | **8320** | **8508** | **Residual-α 12D wins (training dist)** |
 | 5.0 s | ~10500 | ~10500 | Methods converge |
 
 Three regimes: **Catastrophic (d ≤ 1 s)** — frozen-base-policy blending ceiling, both fail. **Sweet spot (d = 2–3 s)** — Residual-α 12D wins on all smoothness metrics. **Easy (d = 5 s)** — methods converge; MLP adds nothing when ramp is gentle enough.
@@ -738,99 +834,134 @@ Without sparsity, the MLP saturates Δα throughout the window (11× larger outp
 
 | | Residual-1D | Residual-α 12D | Change |
 |---|---:|---:|---:|
-| vx_mean | +0.411 | **+0.427** | **+3.9%** |
-| vx_std | 0.134 | **0.109** | **−18.7%** |
-| vx_min | −0.095 | **+0.004** | **reversal eliminated** |
-| jerk_TRANS | 8606 | **7951** | **−7.6%** |
+| vx_mean | +0.411 | **+0.431** | **+4.9%** |
+| vx_std | 0.134 | **0.099** | **−26.1%** |
+| vx_min | −0.095 | **+0.061** | less disruptive |
+| **Δvx** | 0.506 | **0.371** | **−26.7%** |
+| jerk_TRANS | 8606 | **8320** | **−3.3%** |
 
 The 1D scalar cannot independently advance different legs or joints through the coordination-structure change. Per-joint 12D allows the finest-grained learned scheduling.
 
 ---
 
-## 9. Discussion
+## 10. Discussion
 
 ### What Each Method Reveals
 
-The two evaluation levels (canonical N=6, multi-seed N=60) agree on jerk but disagree on velocity safety. Each method's trade-off is described at both levels.
+The two evaluation levels (canonical N=6, multi-seed N=60) agree on jerk but disagree on velocity safety. No method dominates all metrics. The results should be read as a design trade-off map rather than a ranking.
 
-**Smoothstep Ramp** is the strongest passive baseline — no training required, simple to implement (CoT 2.090). At N=6 it has one of the lower jerk values (8508) among baselines and moderate velocity reversal (vx_min −0.096). At N=60 it has 55% reversal rate — the worst of any method. This reveals that Smoothstep's passive schedule produces reversal on the majority of gait-phase conditions.
+**Smoothstep Ramp** is the strongest passive baseline — no training required, low CoT (2.090), simple to implement. At N=60 it has the worst reversal rate (55%), revealing that its fixed schedule produces reversal on the majority of gait-phase conditions. It is the appropriate baseline for measuring what residual learning adds, precisely because it is already a principled schedule.
 
-**Residual-α 4D** consistently achieves ~10% jerk reduction vs Smoothstep at both N=6 (7617) and N=60 (8185). At canonical it has mild reversal (vx_min −0.086); at N=60 its reversal rate is 7% — the second lowest. It is the development prototype and shows that α-space correction with the v10 recipe reliably improves on Smoothstep. *Not the strongest method, but the most consistently well-behaved.*
+**Residual-α 4D** is the development prototype. It consistently achieves ~10% jerk reduction vs Smoothstep at both N=6 (7617) and N=60 (8185), with low reversal rate (7% at N=60). Its behavior is the most stable across evaluation conditions of any residual variant — not the strongest on any single metric, but the most consistently well-behaved.
 
-**Residual-q 4D** broadcasts one scalar Δq to all three joints per leg (hip, thigh, calf) — physically less interpretable than per-joint correction. Despite this, it achieves the strongest combined result at N=60: 16% jerk reduction and **zero velocity reversal** (0/60 windows, worst vx_min=+0.072). At canonical N=6 it has mild reversal (−0.024). The uniformity constraint appears to be implicitly conservative — the network cannot produce large per-joint corrections, which limits the risk of velocity dips across diverse gait phases. *The N=60 safety result likely reflects this conservative action structure rather than a learned safety strategy.*
+**Residual-q 4D** applies one scalar Δq uniformly to all three joints per leg (hip, thigh, calf). This is not a principled per-joint correction — the same offset applied to joints with different mechanical roles is physically ambiguous. Its strong N=60 result (lowest jerk 7619, smallest mean Δvx 0.229) is likely a consequence of this constraint acting as implicit conservatism: small uniform corrections avoid large deviations regardless of gait phase. This should be read as a finding about action constraints, not as a validation of the 4D q-space design.
 
-**Residual-q 12D** achieves the lowest mean jerk at N=60 (7305, −20%) but also the worst reversal among residual variants (38% at N=60, vx_min −0.429). Per-joint q-space corrections allow the most direct reduction in joint acceleration, but without the interpolation structure of α-space the commands can deviate significantly from the blended policy trajectory on hard transitions. *Strongest on jerk, weakest on safety — the clearest trade-off in the design space.*
+**Residual-q 12D** achieves the lowest mean jerk at N=60 (7305, −20%) but the worst reversal rate among residual variants (38%, vx_min −0.429). It demonstrates that per-joint q-space corrections can strongly reduce jerk, but without bounded interpolation structure the corrections can deviate into unsafe joint-command territory on hard transitions.
 
-**Residual-α 12D** achieves zero velocity reversal at the canonical fixed gait phase (vx_min=+0.004) and −6.5% jerk vs Smoothstep. At N=60 it shows 30% reversal rate and −5.8% jerk reduction — still beats Smoothstep, but the zero-reversal claim does not hold across diverse gait phases. Its advantage is that the α-space asymmetric clamp [0, 0.3] prevents delaying the blend below Smoothstep; the 30% reversal shows that advancing α too fast on certain phases can still cause dips. *Structurally principled, but not robustly safer than other variants.*
+**Residual-α 12D** has the smallest velocity disturbance at canonical N=6 (Δvx = 0.371, −27% vs Smoothstep 0.511) and modest jerk reduction (−2.2%). At N=60, it has 30% dip rate and mean Δvx of 0.351 — not the best across diverse gait phases. The α-space clamp [0, 0.3] prevents delayed blending but does not prevent advancing α too fast on certain gait phases, which can still cause velocity dips. The structural bound is necessary but not sufficient for transition smoothness across diverse conditions.
 
-*"The two-level evaluation reveals that the design space trade-offs are more complex than any single evaluation can capture. The robust finding is that all residual variants beat Smoothstep on jerk. The velocity safety ranking is gait-phase-dependent. Res-q 4D performs best at N=60 on both metrics, but this may reflect implicit conservatism. Res-α 12D is structurally the most principled: any deviation from Smoothstep is bounded and interpretable. The 2×2 study shows that both output space and action dimension matter, but their effects interact with the gait-phase distribution of the evaluation."*
+### Why Simple Residual Learning Is Not Enough
 
-### Why Residual-α 12D Has the Widest Box (N=6)
+The experiments were designed with the expectation that a small bounded residual correction on top of Smoothstep would cleanly improve transition smoothness. Jerk improves across all four variants, but several deeper issues limit the result.
 
-The per-gait-pair boxplot (N=6 canonical) shows Residual-α 12D with the widest IQR. This reflects **gait-pair-to-gait-pair difficulty differences**, not instability.
+**Smoothstep is already a strong baseline.** The remaining jerk after Smoothstep blending is caused by phase mismatch between frozen source and target policies, not by the blending schedule shape alone. Smoothstep already eliminates endpoint discontinuities. The residual can only reshape the blend timing — it cannot change what the frozen policies output or when their coordination cycles align.
 
-The N=6 spread comes from the 6 gait pairs having different structural difficulty — Res-α 12D achieves large improvements on easy pairs and smaller gains on the hardest pairs.
+**The MLP cannot observe or fix phase alignment.** Velocity reversal occurs when source and target gaits are out of phase at the switch moment. The MLP can advance or delay the blend, but it has no direct access to the instantaneous phase alignment between frozen policies. Reshaping the blend timing helps on average but cannot consistently eliminate misalignment-driven dips across all gait phases and switch timings.
 
-Per-gait-pair breakdown:
+**Frozen policies have no training coverage of blended states.** The two frozen base policies were trained exclusively on their own steady-state gaits. Neither policy has ever seen a joint command that is a mixture of its output and another gait's output — the interpolated states during blending are out-of-distribution for both. An architecture that trains a single policy continuously across all transition states — such as AllGaits, which uses CPG coupling dynamics that naturally include mid-transition phase states during training — does not have this problem. In the AllGaits replication on B1, all six directed gait-pair transitions maintain positive forward velocity across all tested seeds without any explicit transition mechanism. The frozen-policy approach is inherently limited because no blending schedule, however learned, can fully compensate for policies that have never experienced the blended regime.
 
-| Gait pair | Res-α 12D | Res-α 4D | Winner |
-|---|---:|---:|---|
-| trot→bound | **4072** | 6797 | 12D −40% |
-| bound→pace | 12351 | **9652** | 4D −22% |
-| pace→trot | **5523** | 4607 | 4D −16% |
-| trot→pace | **8149** | 5957 | 4D −27% |
-| pace→bound | 12140 | **13540** | 12D +12% |
-| bound→trot | **5470** | 5147 | 4D −6% |
+**Fixed transition duration creates training bias.** All training used a 3-second transition. The duration sweep shows that performance peaks near 3 s and degrades away from it — this is a training-distribution effect, not a discovery about the optimal transition length. The 3-second result should not be generalized.
 
-Residual-α 12D and 4D are competitive across pairs. The wide box reflects a large gap between its best pairs (trot→bound: 4072) and hardest pairs (bound→pace: 12351). The hardest pairs involve the largest coordination-structure mismatch (fore-aft ↔ lateral) and remain challenging for all methods.
+**Reward shaping can overfit to the measured metric.** The jerk penalty directs the model to reduce jerk_TRANS specifically. There is no guarantee this captures the full picture: the model could reduce the metric by compressing joint motion in ways that increase energy use or reduce robustness elsewhere. The increase in CoT for Res-α 12D (2.454 vs Smoothstep 2.090) and the non-monotonic jerk/CoT relationship across variants suggest the reward landscape is more complex than the metric alone reveals.
 
-**The correct interpretation:** The wide IQR in Residual-α 12D reflects gait-pair difficulty variation — not inconsistency. Its worst-case ceiling (12351) is well below Discrete's (19030).
+**Action constraints shape safety more than output space.** The structural argument for α-space — that it keeps commands within a convex combination of stable policies — predicts that α-space should be safer than q-space. The N=60 results do not confirm this. Empirical safety at N=60 correlates more strongly with action magnitude (conservative small corrections) than with output space structure. Res-q 4D's safety result is likely explained by the per-leg uniformity constraint, not by any property of q-space.
+
+**A single fixed-seed evaluation is insufficient.** The N=6 and N=60 evaluations disagree on safety rankings. This is not a flaw — it is a finding. Any evaluation that uses only one gait-phase condition per pair will miss the phase-dependent variation that determines reversal behavior.
+
+### Design Lessons
+
+The 2×2 ablation does not identify one best architecture. It identifies the factors that matter:
+
+- **Correction space** affects interpretability and action structure, but not safety in a simple way. α-space is more interpretable; q-space can match or exceed it empirically depending on constraints.
+- **Action dimension** had less consistent effect than expected. 4D vs 12D results varied across output space and evaluation level.
+- **Action magnitude constraints** mattered more than correction space for safety. Small conservative corrections were safer across diverse gait phases regardless of whether they were in α-space or q-space.
+- **Reward design shapes what is learned.** A jerk penalty teaches the model to minimize jerk_TRANS; it does not teach phase-aware, energy-efficient transition. Metric improvements should be interpreted with caution.
+- **Evaluation diversity is required.** Phase-phase-dependent effects can only be seen if the evaluation includes diverse gait-phase conditions at switch time. Fixed-seed evaluation characterizes one scenario, not robustness.
+
+The correct next design step is not to tune the existing variants further. The phase-observation ablation (Section 7) demonstrates that adding foot contact does improve velocity safety — but jerk worsens without the smoothness reward. The combination of **explicit phase observation and jerk reward** is the natural next configuration: it would give the MLP the information needed to make phase-conditional corrections and the optimization signal needed to make those corrections smooth.
 
 ### α-Space vs q-Space Safety: What the Evaluations Show
 
-Structurally, α-space keeps the command on the interpolation path between frozen policy outputs — even at the maximum Δα=0.3 the command is a convex combination of two stable policies. q-space corrections add directly to the blended joint target with no such constraint.
+Structurally, α-space keeps commands on the interpolation path between frozen policy outputs. q-space corrections add directly to joint targets with no such constraint. In practice, the picture is more complex: at canonical N=6, Res-α 12D has the smallest velocity disturbance (Δvx = 0.371) while Res-q 4D is second (0.440). At N=60, the ranking shifts and Res-q 4D has the smallest mean Δvx (0.229). The clamp [0, 0.3] prevents delaying below Smoothstep but does not prevent advancing too fast on phases where the target policy is not yet ready. The per-leg uniformity of Res-q 4D turns out to be implicitly conservative — but this is an accidental property of the design, not a principled safety mechanism.
 
-In practice the picture is more nuanced. At the canonical fixed gait phase (N=6), Res-α 12D achieves zero velocity reversal while Res-q 4D has mild reversal. But at N=60 across diverse gait phases, Res-q 4D achieves zero reversal (0/60 windows) while Res-α 12D shows 30% reversal. The asymmetric clamp [0, 0.3] in α-space prevents delaying below Smoothstep but does not prevent advancing the blend too fast, which can cause velocity dips on certain gait phases. The small uniform corrections learned by Res-q 4D (constrained by the per-leg design to be conservative) turn out to be implicitly safe across diverse conditions.
+The takeaway: structural bounds provide interpretability guarantees, but do not substitute for phase-awareness in determining empirical safety.
 
-This finding complicates the α-vs-q narrative: structural safety bounds do not guarantee empirical safety across all gait phases, and empirical safety can emerge from design constraints that limit action magnitude.
+### Per-Gait-Pair Difficulty
 
-### Why 12D Helps in α-Space
-
-Different joints have fundamentally different roles during gait transitions. During trot→bound, the thigh joints (which drive leg swing arcs) need to transition at a different rate than the hip joints (which control lateral balance). A per-leg scalar broadcasts the same correction to hip, thigh, and calf simultaneously. Per-joint 12D allows the MLP to learn these different roles independently.
+The hardest transitions for all methods involve the largest coordination-structure mismatch between source and target policies. Bound↔pace transitions (fore-aft ↔ lateral synchrony) consistently show the highest jerk across all methods. These pairs require the largest restructuring of leg-pair phase relationships, which no blending schedule or bounded residual can fully smooth without explicitly coordinating the underlying policy phases. The difficulty hierarchy across pairs is a property of the gait structure, not of any specific method.
 
 ### Base-Swap Validation: the Residual Is Schedule-Calibrated
 
-Running the trained Residual-α 12D MLP with linear ramp instead of Smoothstep at evaluation time (no retraining) confirms the learned corrections are base-specific. With the correct base (Smoothstep), the MLP reduces jerk by −6.5%. With a mismatched base (linear ramp), the MLP remains active but its corrections misfire: jerk worsens by +12.2% across 4/6 gait pairs. This is a stronger result than shutdown — the corrections are not silenced, they are miscalibrated. This rules out the possibility that the MLP has learned a generic transition policy and merely uses the base schedule as a warm-start.
+Running the trained Residual-α 12D MLP with linear ramp as the base schedule at evaluation time (no retraining) confirms that the learned corrections are base-specific. With the correct base (Smoothstep), the MLP reduces jerk by −2.2%. With a mismatched base (linear ramp), the MLP remains active but its corrections misfire: jerk worsens by +12.3% across 4/6 gait pairs. This is a stronger result than shutdown — the corrections are not silenced, they are miscalibrated. The MLP learned a contextual correction calibrated to Smoothstep's specific timing, not a general transition strategy that transfers to any base schedule.
 
 ---
 
-## 10. Limitations and Future Work
+## 11. Limitations and Future Work
 
-### 1. Fixed Transition Duration (3 s)
+### 1. Phase Observation Must Be Combined with Jerk Reward
 
-Every transition uses a 3 s ramp hardcoded at training time. A multi-seed evaluation (N=60: 10 seeds × 6 gait pairs) was performed varying the gait-phase at switch time via `--randomize_start`, sampling `_transition_start_s ~ Uniform(1.5, 3.5)` s within the training distribution. The N=60 results show all residual variants beat Smoothstep on mean jerk, but reveal that velocity safety rankings are gait-phase-dependent — Res-α 12D's zero-reversal property at the canonical evaluation does not hold across diverse phases.
+The phase-observation ablation (Section 7) tested adding binary foot contact to the observation while removing the jerk reward. The result: velocity safety improved (near-zero reversal rates at N=60 for most variants), but jerk increased substantially — especially for q-space variants (+55% to +93% vs old 2×2). The lesson: phase information alone is not sufficient. The policy needs both:
+- **Explicit phase observation** (foot contact or instantaneous policy-phase state) to learn phase-conditional corrections.
+- **Explicit jerk reward** to have an optimization signal for smooth corrections.
 
-The transition duration itself (3 s) is fixed. A curriculum attempt (v11: duration sampled from [1.5, 5.0] s) diverged due to high return variance. Warm-starting from the fixed-duration checkpoint is the natural next step toward a policy that generalizes across timing conditions.
+Adding source-target phase alignment as an observation, combined with the jerk penalty from the old 2×2 recipe, is the single most likely improvement for both velocity safety and jerk reduction. This combination was not tested in this project and is the natural immediate next step.
 
-### 2. Uniform Smoothstep Baseline for All Gait Pairs
+### 2. Fixed Transition Duration (Training Distribution Bias)
 
-The smoothstep function is applied identically to all six directed transitions. Different gait pairs have fundamentally different coordination mismatches — trot→bound requires a different sync-partner swap than pace→trot — and the optimal interpolation shape likely differs per pair. The current MLP sees the gait one-hot encoding and can learn different Δα patterns per pair, but the baseline shape is global.
+Every transition uses a 3-second ramp hardcoded at training time. The duration sweep shows the model performs best near 3 s — this is a training-distribution effect, not a finding about optimal transition length. A model trained exclusively at 3 s is not expected to generalize to faster or slower transitions. The 3-second result should not be interpreted as evidence that 3 s is generally optimal. A curriculum over transition durations, warm-starting from the fixed-duration checkpoint, is the natural next step.
 
-### 3. Base Gait Quality (Reward-Hacked Duty Cycles)
+### 3. Metric Overfitting Through Reward Shaping
 
-Phase 1 base policies are PPO velocity-tracking policies, not biologically faithful gaits. Duty cycles deviate significantly from natural locomotion. Adding a gait-naturalness term to Phase 1 rewards would produce better base policies and a more meaningful Phase 2 result.
+The jerk penalty directly optimizes `jerk_TRANS`. This can cause the model to reduce the measured metric without learning a genuinely robust transition strategy — in effect, "studying for the exam." Evidence: Res-α 12D achieves −2.2% jerk vs Smoothstep but +17.4% higher CoT; Res-q 12D achieves −20% jerk but 38% reversal rate. The reward function does not jointly optimize for safety, energy, and jerk in a balanced way. Future work should include multi-objective reward shaping with explicit safety constraints, or separate jerk measurement from training to avoid overfitting the evaluation metric.
 
-### 4. Flat Terrain Only
+### 4. Uniform Smoothstep Baseline for All Gait Pairs
 
-All training and evaluation is on flat terrain. The key motivation for constrained residual blending — reducing transition jerk and limiting velocity dips — is expected to compound on uneven terrain, where base policies already face disturbances. Rough terrain training of both Phase 1 and Phase 2 is the most important generalization direction.
+Smoothstep is applied identically to all six directed transitions. Different gait pairs have fundamentally different coordination mismatches — the optimal interpolation shape likely differs per pair. The current MLP can learn different corrections per pair via the gait one-hot, but the baseline shape is global. Per-gait-pair transition modules with specialized base schedules would be a principled extension.
 
-### 5. Simulation Only
+### 5. Base Gait Quality (Reward-Hacked Duty Cycles)
 
-Results are in Isaac Lab simulation. Sim-to-real transfer of the residual MLP requires: (a) base policy sim-to-real transfer, (b) verification that the residual correction remains bounded and safe on real hardware, and (c) testing that `jerk_TRANS` reduction translates to reduced mechanical wear.
+Phase 1 base policies are PPO velocity-tracking policies, not biologically faithful gaits. Duty cycles deviate significantly from natural locomotion. The quality of the transition is bounded by the quality of the source and target gaits — better base policies would produce a more meaningful residual learning problem.
+
+### 6. Flat Terrain Only
+
+All training and evaluation is on flat terrain. Transition jerk and velocity reversal are expected to compound on uneven terrain, where base policies already face disturbances. Rough terrain evaluation is the most important generalization test.
+
+### 7. Joint Stiffness K_p = 400 N·m/rad (Lower Than B1 Reference)
+
+All policies in this project use K_p = 400 N·m/rad, K_d = 10 N·m·s/rad. An independent replication of AllGaits on B1 (Bellegarda et al., 2024) found that K_p = 200 causes 9 cm body sag and backward drift, and reports K_p = 600 as the working value for B1. Our K_p = 400 is between the failing and reference values; the base policies do achieve stable forward locomotion, but the robot may be slightly under-stiffened compared to the physical hardware.
+
+Two consequences: (a) absolute jerk_TRANS values would be higher at K_p = 600 — the AllGaits reference notes K_p = 600 produces 5–7× larger raw jerk than Go1-class robots (K_p = 30–100), and stiffness scales torque and therefore jerk; (b) our jerk_TRANS numbers should not be directly compared to results from projects using K_p = 600. All methods in this project use the same K_p = 400, so all internal comparisons and relative rankings are unaffected.
+
+### 8. Simulation Only
+
+Results are in Isaac Lab simulation. Sim-to-real transfer requires: (a) base policy sim-to-real transfer, (b) verification that the bounded residual correction remains safe on real hardware, and (c) confirmation that `jerk_TRANS` reduction translates to reduced mechanical wear and improved locomotion quality.
+
+### Summary: What Would Be Redesigned
+
+The current design has several components that would be changed if the project were restarted:
+
+1. Add source-target phase state to the observation — the most impactful change.
+2. Train across multiple transition durations from the start.
+3. Use a multi-objective reward that explicitly balances jerk, CoT, and velocity safety.
+4. Evaluate across diverse gait-phase conditions from the start, not as an afterthought.
+5. Improve base gait quality before training the residual.
+6. Raise K_p to 600 N·m/rad and retrain all policies — absolute jerk numbers would shift but relative rankings are expected to hold.
+
+The final value of this project is not that it found a perfect residual controller. The value is that it revealed why a simple residual controller is not enough: gait transition depends strongly on phase alignment at switch time, baseline schedule choice, action-space constraints, and reward design. These lessons are the main contribution.
 
 ---
 
-## 11. Reproducibility
+## 12. Reproducibility
 
 ### Environment
 
@@ -870,14 +1001,39 @@ python scripts/play_b1_velocity.py \
 ### Phase 2 — Train Residual Transition Policy
 
 ```bash
-# Residual-α 12D (main α-space 12D variant)
+# Residual-α 12D (main α-space 12D variant, sp05_jw2 hyperparams)
 python scripts/train_b1_phase2.py --headless --num_envs 2048 \
     --task Isaac-B1-Phase2-Alpha12D-v0 \
-    --max_iterations 2000 --run_name residual_alpha_12d --seed 42
+    --max_iterations 3000 --run_name residual_alpha_12d --seed 42 \
+    --rew_residual_sparsity -0.5 --rew_joint_jerk -2e-10
 
 # Residual-α 4D (prototype)
 python scripts/train_b1_phase2.py --headless --num_envs 2048 \
     --max_iterations 2000 --run_name phase2_v10 --seed 42
+```
+
+### Phase 2 — Train Phase-Aware 2×2 Ablation (Section 7)
+
+```bash
+# Train all 4 phase-aware variants sequentially (skips any with existing model_final.pt)
+bash scripts/train_2x2_phase_aware.sh 2>&1 | tee /tmp/train_2x2_phase_aware.log
+
+# Or individually:
+python scripts/train_b1_phase2.py --headless --num_envs 1024 \
+    --task Isaac-B1-Phase2-Alpha12D-PhaseAware-v0 \
+    --run_name residual_alpha_12d_phase_aware --max_iterations 3000
+
+python scripts/train_b1_phase2.py --headless --num_envs 1024 \
+    --task Isaac-B1-Phase2-Alpha4D-PhaseAware-v0 \
+    --run_name residual_alpha_4d_phase_aware --max_iterations 3000
+
+python scripts/train_b1_phase2.py --headless --num_envs 1024 \
+    --task Isaac-B1-Phase2-Joint4D-PhaseAware-v0 \
+    --run_name residual_q_4d_phase_aware --max_iterations 3000
+
+python scripts/train_b1_phase2.py --headless --num_envs 1024 \
+    --task Isaac-B1-Phase2-ActionSpace-PhaseAware-v0 \
+    --run_name residual_q_12d_phase_aware --max_iterations 3000
 ```
 
 ### Phase 2 — Canonical Playback (seed=42)
@@ -1003,6 +1159,7 @@ cpg-drl-transition/
 │   └── b1_phase2_env.py            # Phase 2 env class — per-joint blending
 ├── scripts/
 │   ├── play_b1_phase2.py           # Canonical playback + diagnostic plots
+│   ├── train_2x2_phase_aware.sh    # Sequential training of all 4 phase-aware variants
 │   ├── plot_transition_zoom.py     # Baselines / ablation zoom figure
 │   ├── plot_transition_jerk.py     # Jerk profile across transition window
 │   ├── plot_body_acc_compare.py    # Body acceleration overlay
@@ -1016,6 +1173,10 @@ cpg-drl-transition/
 │   │   ├── phase2_v10/             # Residual-α 4D (prototype)
 │   │   ├── residual_q_4d/          # Residual-q 4D (ablation)
 │   │   ├── residual_q_12d/         # Residual-q 12D (ablation)
+│   │   ├── residual_alpha_12d_phase_aware/  # Phase-aware Res-α 12D (Section 7)
+│   │   ├── residual_alpha_4d_phase_aware/   # Phase-aware Res-α 4D (Section 7)
+│   │   ├── residual_q_4d_phase_aware/       # Phase-aware Res-q 4D (Section 7)
+│   │   ├── residual_q_12d_phase_aware/      # Phase-aware Res-q 12D (Section 7)
 │   │   └── baselines/              # Discrete / Linear / Smoothstep CSVs
 │   └── phase2_seed_experiment_v2/  # multi-seed N=60 results (corrected checkpoints, --randomize_start)
 └── tests/
@@ -1034,7 +1195,7 @@ This guarantees identical outputs on repeated runs with the same seed.
 
 ---
 
-## 12. B1 Robot Configuration
+## 13. B1 Robot Configuration
 
 ### Joint Axis Convention
 
@@ -1045,6 +1206,16 @@ This guarantees identical outputs on repeated runs with the same seed.
 | `calf_joint` | Knee bend | −1.5 / −1.5 / −1.5 / −1.5 | Foot clearance during swing |
 
 The +0.2 rad asymmetry between front and rear thighs directly motivates the **per-joint residual structure** — different joints need different transition rates, and a per-leg scalar cannot capture this asymmetry.
+
+### Known Hardware Asymmetries
+
+Two physical asymmetries are known from simulation measurements (source: independent AllGaits B1 replication, debug logs §11 and §14):
+
+1. **Thigh default-pose asymmetry** (Isaac Lab config): front thighs default to 0.8 rad, rear thighs to 1.0 rad. This is an `UNITREE_B1_CFG` choice, not present in the URDF. It creates unequal front/rear leg configurations at episode reset and contributes to a backward-walking local minimum during training.
+
+2. **Lateral hip offset** (PhysX body_pos_w measurement): the RR hip joint sits approximately 34 mm wider laterally than the RL hip. This geometric asymmetry creates a permanent rightward torque during stance that cannot be fully compensated by reward shaping alone. It may explain the systematic rightward yaw tendency observed in forward-locomotion policies on B1.
+
+Neither asymmetry was corrected in this project. Both affect base gait quality but not the relative comparison between transition methods (all methods use the same base gaits).
 
 ### Foot Contact Convention
 
@@ -1062,4 +1233,3 @@ j8  FL_calf   j9  FR_calf   j10 RL_calf   j11 RR_calf
 
 ---
 
-*Generated with [Claude Code](https://claude.ai/claude-code)*

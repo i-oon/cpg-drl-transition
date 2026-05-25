@@ -37,6 +37,8 @@ parser.add_argument("--rew_residual_sparsity", type=float, default=None,
                     help="Override rew_residual_sparsity. Use 0.0 for the no-sparsity ablation.")
 parser.add_argument("--rew_joint_jerk", type=float, default=None,
                     help="Override rew_joint_jerk. Use 0.0 for no-jerk-penalty baseline.")
+parser.add_argument("--rew_vx_window", type=float, default=None,
+                    help="Override rew_vx_window. Velocity-stability penalty during transition window.")
 args = parser.parse_args()
 
 app_launcher = AppLauncher(args)
@@ -53,11 +55,15 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2EnvCfg, B1Phase2E2EEnvCfg,
     B1Phase2Residual1DEnvCfg, B1Phase2E2ERateEnvCfg,
     B1Phase2ActionSpaceEnvCfg, B1Phase2Joint4DEnvCfg, B1Phase2Alpha12DEnvCfg,
+    B1Phase2Alpha12DPhaseAwareEnvCfg, B1Phase2Alpha4DPhaseAwareEnvCfg,
+    B1Phase2Joint4DPhaseAwareEnvCfg, B1Phase2ActionSpacePhaseAwareEnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import (
     Phase2PPORunnerCfg, Phase2E2EPPORunnerCfg,
     Phase2Residual1DPPORunnerCfg, Phase2E2ERatePPORunnerCfg,
     Phase2ActionSpacePPORunnerCfg, Phase2Joint4DPPORunnerCfg, Phase2Alpha12DPPORunnerCfg,
+    Phase2Alpha12DPhaseAwarePPORunnerCfg, Phase2Alpha4DPhaseAwarePPORunnerCfg,
+    Phase2Joint4DPhaseAwarePPORunnerCfg, Phase2ActionSpacePhaseAwarePPORunnerCfg,
 )
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
@@ -70,6 +76,10 @@ _task_cfg_map = {
     "Isaac-B1-Phase2-ActionSpace-v0": (Phase2ActionSpacePPORunnerCfg, B1Phase2ActionSpaceEnvCfg),
     "Isaac-B1-Phase2-Joint4D-v0":     (Phase2Joint4DPPORunnerCfg,    B1Phase2Joint4DEnvCfg),
     "Isaac-B1-Phase2-Alpha12D-v0":    (Phase2Alpha12DPPORunnerCfg,   B1Phase2Alpha12DEnvCfg),
+    "Isaac-B1-Phase2-Alpha12D-PhaseAware-v0":    (Phase2Alpha12DPhaseAwarePPORunnerCfg,   B1Phase2Alpha12DPhaseAwareEnvCfg),
+    "Isaac-B1-Phase2-Alpha4D-PhaseAware-v0":     (Phase2Alpha4DPhaseAwarePPORunnerCfg,    B1Phase2Alpha4DPhaseAwareEnvCfg),
+    "Isaac-B1-Phase2-Joint4D-PhaseAware-v0":     (Phase2Joint4DPhaseAwarePPORunnerCfg,    B1Phase2Joint4DPhaseAwareEnvCfg),
+    "Isaac-B1-Phase2-ActionSpace-PhaseAware-v0": (Phase2ActionSpacePhaseAwarePPORunnerCfg, B1Phase2ActionSpacePhaseAwareEnvCfg),
 }
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -147,6 +157,9 @@ if args.rew_residual_sparsity is not None:
 if args.rew_joint_jerk is not None:
     env_cfg.rew_joint_jerk = args.rew_joint_jerk
     print(f"  [override] rew_joint_jerk = {args.rew_joint_jerk}")
+if args.rew_vx_window is not None:
+    env_cfg.rew_vx_window = args.rew_vx_window
+    print(f"  [override] rew_vx_window = {args.rew_vx_window}")
 
 # Verify all four base policy checkpoints exist
 for path in env_cfg.base_policy_paths:

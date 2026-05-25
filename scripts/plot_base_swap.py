@@ -6,7 +6,7 @@ when the base is replaced with linear ramp at evaluation time (no retraining),
 the MLP's corrections become miscalibrated — it remains active but hurts on
 4/6 gait pairs, raising mean jerk_TRANS by +12% above the linear-ramp baseline.
 
-With the correct base (Smoothstep), the MLP reduces mean jerk by −6.5%.
+With the correct base (Smoothstep), the MLP reduces mean jerk by −2.2%.
 The divergence between SS+MLP and LR+MLP proves the corrections are
 Smoothstep-specific and cannot compensate for a mismatched base schedule.
 
@@ -246,7 +246,7 @@ ax_heat.set_yticks([0, 1])
 ax_heat.set_yticklabels(["Δα = 0\n(no MLP)", "Δα = MLP output"], fontsize=11)
 ax_heat.set_title(
     "Panel C — Mean jerk_TRANS (N=6)  |  lower = better\n"
-    "MLP with correct base (SS): −6.5%  |  MLP with wrong base (LR): +12.2% WORSE — corrections actively misfire",
+    "MLP with correct base (SS): −2.2%  |  MLP with wrong base (LR): +12.3% WORSE — corrections actively misfire",
     fontsize=9, loc="left"
 )
 plt.colorbar(im, ax=ax_heat, fraction=0.025, pad=0.02,
@@ -255,7 +255,7 @@ plt.colorbar(im, ax=ax_heat, fraction=0.025, pad=0.02,
 # ── Suptitle ──────────────────────────────────────────────────────────────────
 fig.suptitle(
     "Base-swap validation: the trained Res-α 12D MLP is Smoothstep-specific\n"
-    "With correct base (SS): −6.5% jerk  |  With wrong base (LR, no retraining): +12.2% jerk — corrections misfire on 4/6 pairs",
+    "With correct base (SS): −2.2% jerk  |  With wrong base (LR, no retraining): +12.3% jerk — corrections misfire on 4/6 pairs",
     fontsize=10, y=0.975
 )
 

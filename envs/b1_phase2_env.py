@@ -318,6 +318,16 @@ class B1Phase2Env(DirectRLEnv):
             # range) so the value stays in [0.3, 1.0] during training.
             norm_duration = (self._transition_duration_env / 5.0).unsqueeze(1)  # (E, 1)
             obs_parts.append(norm_duration)
+        if self.cfg.observation_space >= 49:
+            # Phase-aware variant: append 4D binary foot contact (FL/FR/RL/RR).
+            # Gives the MLP an explicit gait-phase proxy at switch time so it
+            # can condition corrections on which legs are in stance/swing.
+            nf = self._contact_sensor.data.net_forces_w_history  # (E, H, bodies, 3)
+            foot_forces = torch.stack(
+                [nf[:, 0, fid, :] for fid in self._foot_ids], dim=1
+            )  # (E, 4, 3)
+            foot_contact = (torch.norm(foot_forces, dim=-1) > 1.0).float()  # (E, 4)
+            obs_parts.append(foot_contact)
         obs = torch.cat(obs_parts, dim=1)
         return {"policy": obs}
 
@@ -374,8 +384,14 @@ class B1Phase2Env(DirectRLEnv):
         # tracking/orientation rewards it enables.
         sparsity = torch.sum(self._last_residual ** 2, dim=1) * cfg.rew_residual_sparsity
 
+        # Velocity-stability penalty during transition window: penalises forward
+        # velocity deviation from command only while the ramp is active.
+        # Default weight is 0.0 → term vanishes for all base variants.
+        vx_err = (d.root_lin_vel_b[:, 0] - self._cmd[:, 0]) ** 2
+        vx_window = vx_err * in_window_r * cfg.rew_vx_window
+
         return (track_lin + track_ang + orient + height_err + action_rate
-                + joint_acc + joint_jerk + alive + sparsity)
+                + joint_acc + joint_jerk + alive + sparsity + vx_window)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (terminated, truncated)."""
@@ -585,6 +601,46 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2Alpha12DEnvCfg",
         "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2Alpha12DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-Alpha12D-PhaseAware-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2Alpha12DPhaseAwareEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2Alpha12DPhaseAwarePPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-Alpha4D-PhaseAware-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2Alpha4DPhaseAwareEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2Alpha4DPhaseAwarePPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-Joint4D-PhaseAware-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2Joint4DPhaseAwareEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2Joint4DPhaseAwarePPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-ActionSpace-PhaseAware-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2ActionSpacePhaseAwareEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2ActionSpacePhaseAwarePPORunnerCfg",
     },
 )
 

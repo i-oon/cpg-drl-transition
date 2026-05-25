@@ -163,3 +163,27 @@ class Phase2Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
     Dimension matches Residual-q 12D for a fair space-controlled comparison.
     """
     experiment_name = "b1_phase2_residual_alpha_12d"
+
+
+@configclass
+class Phase2Alpha12DPhaseAwarePPORunnerCfg(Phase2Alpha12DPPORunnerCfg):
+    """Residual-α 12D with foot-contact phase observation (49D obs)."""
+    experiment_name = "b1_phase2_residual_alpha_12d_phase_aware"
+
+
+@configclass
+class Phase2Alpha4DPhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
+    """Residual-α 4D with foot-contact phase observation (49D obs)."""
+    experiment_name = "b1_phase2_residual_alpha_4d_phase_aware"
+
+
+@configclass
+class Phase2Joint4DPhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
+    """Residual-q 4D with foot-contact phase observation (49D obs)."""
+    experiment_name = "b1_phase2_residual_q_4d_phase_aware"
+
+
+@configclass
+class Phase2ActionSpacePhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
+    """Residual-q 12D with foot-contact phase observation (49D obs)."""
+    experiment_name = "b1_phase2_residual_q_12d_phase_aware"
