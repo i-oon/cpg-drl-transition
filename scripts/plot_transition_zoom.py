@@ -6,6 +6,7 @@ Modes
 baselines  — Discrete / Linear ramp / Smoothstep / Residual-α 4D (Ours)
              (pass --no_e2e to drop E2E; default omits it)
 ablation   — 2×2: Res-α 4D / Res-q 4D / Res-α 12D / Res-q 12D
+expA       — Exp A 2×2: Discrete + Smoothstep + all 4 Exp A residual variants
 
 Four panels per figure:
   1. α(t)                 — blending schedule shape
@@ -16,6 +17,8 @@ Four panels per figure:
 Usage:
     python scripts/plot_transition_zoom.py --mode baselines
     python scripts/plot_transition_zoom.py --mode ablation
+    python scripts/plot_transition_zoom.py --mode expA
+    python scripts/plot_transition_zoom.py --mode expA --window 1
     python scripts/plot_transition_zoom.py --mode baselines --window 3
     python scripts/plot_transition_zoom.py --mode baselines --out logs/phase2/zoom_baselines.png
 """
@@ -32,9 +35,11 @@ import matplotlib.patches as mpatches
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", default="baselines",
-                    choices=["baselines", "ablation"],
+                    choices=["baselines", "ablation", "expA", "expB"],
                     help="baselines = discrete/ramp/smoothstep/ours; "
-                         "ablation = 2×2 residual variants")
+                         "ablation = 2×2 residual variants; "
+                         "expA = discrete+smoothstep+all 4 Exp A variants; "
+                         "expB = discrete+smoothstep+all 4 Exp B contact variants")
 parser.add_argument("--include_e2e", action="store_true",
                     help="Add E2E baseline to baselines plot")
 parser.add_argument("--window", type=int, default=0,
@@ -46,7 +51,8 @@ parser.add_argument("--out", default=None,
 args = parser.parse_args()
 
 if args.out is None:
-    args.out = f"logs/phase2/transition_zoom_{args.mode}.png"
+    args.out = f"logs/phase2_v3/transition_zoom_{args.mode}.png" if args.mode in ("expA", "expB") \
+               else f"logs/phase2/transition_zoom_{args.mode}.png"
 
 DT = 0.02
 
@@ -68,10 +74,34 @@ ABLATION = [
     ("Res-q 12D", "logs/phase2/residual_q_12d_sp05_jw2/playback_seed42.csv",    "#ff7f0e", "--", 1.6),
 ]
 
+# Experiment A: Discrete + Smoothstep as baselines, then all 4 Exp A residual variants
+EXP_A = [
+    ("Discrete Switch", "logs/phase2/baselines/discrete/playback_seed42.csv",        "#d62728", "--", 2.0),
+    ("Smoothstep",      "logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv", "#2ca02c", "-",  1.8),
+    ("Exp A  Sched-α 4D",  "logs/phase2/residual_alpha_4d_sp05_jw2/playback_seed42.csv", "#1f77b4", "-",  1.8),
+    ("Exp A  Sched-α 12D", "logs/phase2/residual_alpha_12d/playback_seed42.csv",         "#1f77b4", "--", 2.2),
+    ("Exp A  Action-q 4D", "logs/phase2/residual_q_4d_sp05_jw2/playback_seed42.csv",     "#ff7f0e", "-",  1.8),
+    ("Exp A  Action-q 12D","logs/phase2/residual_q_12d_sp05_jw2/playback_seed42.csv",    "#ff7f0e", "--", 1.6),
+]
+
+# Experiment B (contact-phase obs): Discrete + Smoothstep + all 4 contact variants
+EXP_B = [
+    ("Discrete Switch", "logs/phase2/baselines/discrete/playback_seed42.csv",        "#d62728", "--", 2.0),
+    ("Smoothstep",      "logs/phase2/baselines/smoothstep_ramp/playback_seed42.csv", "#2ca02c", "-",  1.8),
+    ("Exp B  Sched-α 4D",  "logs/phase2_new_approach/schedule_residual_4d_v3/playback_seed42.csv",  "#1f77b4", "-",  1.8),
+    ("Exp B  Sched-α 12D", "logs/phase2_new_approach/schedule_residual_12d_v3/playback_seed42.csv", "#1f77b4", "--", 2.2),
+    ("Exp B  Action-q 4D", "logs/phase2_new_approach/action_residual_4d_v3/playback_seed42.csv",    "#ff7f0e", "-",  1.8),
+    ("Exp B  Action-q 12D","logs/phase2_new_approach/action_residual_12d_v3/playback_seed42.csv",   "#ff7f0e", "--", 1.6),
+]
+
 if args.mode == "baselines":
     METHODS = list(BASELINES)
     if args.include_e2e:
         METHODS.insert(3, E2E_ENTRY)   # insert before Residual
+elif args.mode == "expA":
+    METHODS = EXP_A
+elif args.mode == "expB":
+    METHODS = EXP_B
 else:
     METHODS = ABLATION
 
@@ -191,20 +221,23 @@ axes[3].axhline(0.0, color="gray", lw=0.8, ls="--", alpha=0.5)
 axes[3].axhline(0.4, color="gray", lw=0.8, ls=":",  alpha=0.4)
 axes[3].set_xlabel("Time relative to gait switch command [s]", fontsize=10)
 
-# ── Spike annotation (baselines mode only — annotate the discrete spike) ──────
-if args.mode == "baselines" and "Discrete Switch" in datasets:
+# ── Spike annotation — annotate the discrete spike when present ───────────────
+if args.mode in ("baselines", "expA", "expB") and "Discrete Switch" in datasets:
     disc = datasets["Discrete Switch"]
     ts   = disc["t_start"]
     mask_n = (disc["t"] >= ts) & (disc["t"] <= ts + 0.3)
     peak_val = disc["jv_max"][mask_n].max()
     peak_t_rel = disc["t"][mask_n][np.argmax(disc["jv_max"][mask_n])] - ts
 
-    ours_label = "Residual-α 12D"
-    ours_peak  = peaks.get(ours_label, 1.0)
+    if args.mode == "baselines":
+        ours_label = "Residual-α 12D"
+    else:
+        ours_label = "Smoothstep"
+    ours_peak = peaks.get(ours_label, 1.0)
     if ours_peak > 0:
         ratio = peak_val / ours_peak
         axes[1].annotate(
-            f"{peak_val:.1f} rad/s  (×{ratio:.0f} vs ours)",
+            f"{peak_val:.1f} rad/s  (×{ratio:.1f} vs Smoothstep)",
             xy=(peak_t_rel, peak_val),
             xytext=(0.6, peak_val * 0.82),
             color="#d62728", fontsize=9, fontweight="bold",
@@ -220,11 +253,18 @@ legend_patches = [
 axes[3].legend(handles=legend_patches, loc="lower right", fontsize=8.5,
                framealpha=0.88, ncol=3)
 
-# ── Ablation legend hint ──────────────────────────────────────────────────────
+# ── Ablation / Exp A legend hint ─────────────────────────────────────────────
 if args.mode == "ablation":
     axes[0].text(0.01, 0.05,
                  "Blue = α-space  |  Orange = q-space\n"
                  "Solid = 4D  |  Dashed = 12D  (best: Res-α 12D)",
+                 transform=axes[0].transAxes, fontsize=8,
+                 va="bottom", color="0.35",
+                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.8", alpha=0.85))
+elif args.mode in ("expA", "expB"):
+    axes[0].text(0.01, 0.05,
+                 "Blue = Sched-α  |  Orange = Action-q\n"
+                 "Solid = 4D  |  Dashed = 12D",
                  transform=axes[0].transAxes, fontsize=8,
                  va="bottom", color="0.35",
                  bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.8", alpha=0.85))
@@ -246,6 +286,8 @@ for label, path, *_ in METHODS:
 mode_title = {
     "baselines": "Baselines comparison",
     "ablation":  "2×2 ablation — output space × action dimension",
+    "expA":      "Experiment A — Direct Jerk Optimization (2×2 residual variants)",
+    "expB":      "Experiment B — Velocity Safety, contact-phase obs (2×2 residual variants)",
 }
 fig.suptitle(
     f"{mode_title[args.mode]} — {pair_str}\n"

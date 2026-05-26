@@ -218,8 +218,9 @@ class B1Phase2EnvCfg(DirectRLEnvCfg):
     # but nonzero during transitions only when it stabilizes the body.
     rew_residual_sparsity: float = -3.0
     # Velocity-stability penalty during transition window only.
-    # Penalises (vx − cmd_vx)² weighted by in_window, so the MLP learns to
-    # maintain forward speed through phase transitions. Default 0 → disabled.
+    # Computes (vx − cmd_vx)² × in_window × weight. Must be NEGATIVE to penalise
+    # velocity error (positive weight would reward deviation — a bug).
+    # Default 0 → disabled. V2 configs use -2.0.
     rew_vx_window: float = 0.0
     target_height: float = 0.42
 
@@ -327,9 +328,10 @@ class B1Phase2Joint4DEnvCfg(B1Phase2EnvCfg):
 class B1Phase2Alpha12DEnvCfg(B1Phase2EnvCfg):
     """Residual-α 12D — blending-weight correction, per-joint.
 
-    MLP outputs 12-D Δα (one per joint), each clamped via sigmoid to [0, 0.3].
-    Every joint gets its own independent α correction rather than sharing one
-    per leg. This matches Residual-q 12D's dimension exactly while keeping
+    MLP outputs 12-D Δα (one per joint), clamped via sigmoid to [0, 0.3]
+    (advance-only). V2 subclass overrides bidirectional_alpha=True → tanh
+    → Δα ∈ [−0.3, +0.3]. Every joint gets its own independent α correction.
+    This matches Residual-q 12D's dimension exactly while keeping
     the output space as α (blending weight).
 
     Part of the 2×2 ablation (space × dimension):
@@ -340,7 +342,7 @@ class B1Phase2Alpha12DEnvCfg(B1Phase2EnvCfg):
 
     residual_mode: str = "alpha"
     action_space: int = 12
-    # delta_alpha_max inherited (0.3) — same sigmoid bound as 4D variant
+    # delta_alpha_max inherited (0.3) — base uses sigmoid (advance-only); V2 subclass overrides to tanh (bidirectional)
 
 
 @configclass
@@ -442,7 +444,8 @@ class B1Phase2V2Alpha4DEnvCfg(B1Phase2EnvCfg):
     rew_joint_jerk: float = 0.0
     rew_joint_acc: float = 0.0
     rew_residual_sparsity: float = -0.5
-    rew_vx_window: float = 2.0
+    rew_vx_window: float = -2.0
+    rew_action_rate: float = -0.5
     bidirectional_alpha: bool = True
 
 
@@ -452,14 +455,17 @@ class B1Phase2V2Alpha12DEnvCfg(B1Phase2Alpha12DEnvCfg):
 
     Correction space: α (blending weight), action_space=12 (per-joint).
     Bidirectional: Δα ∈ [−0.3, +0.3] — MLP can delay or advance per joint.
+    Obs 78D: 53D base (with full 12D last_action) + 1 norm_duration + 12 π_current + 12 π_target.
+    Full 12D last_action gives the MLP per-joint correction memory → smoother corrections.
     """
-    observation_space: int = 70
+    observation_space: int = 78
     transition_duration_min_s: float = 1.5
     transition_duration_max_s: float = 5.0
     rew_joint_jerk: float = 0.0
     rew_joint_acc: float = 0.0
-    rew_residual_sparsity: float = -0.5
-    rew_vx_window: float = 2.0
+    rew_residual_sparsity: float = -0.167  # -0.5 * 4/12 — normalised per-dim vs 4D variant
+    rew_vx_window: float = -2.0
+    rew_action_rate: float = -0.5          # stronger smoothness pressure for 12D corrections
     bidirectional_alpha: bool = True
 
 
@@ -475,7 +481,8 @@ class B1Phase2V2Joint4DEnvCfg(B1Phase2Joint4DEnvCfg):
     rew_joint_jerk: float = 0.0
     rew_joint_acc: float = 0.0
     rew_residual_sparsity: float = -0.5
-    rew_vx_window: float = 2.0
+    rew_vx_window: float = -2.0
+    rew_action_rate: float = -0.5
 
 
 @configclass
@@ -483,11 +490,50 @@ class B1Phase2V2Joint12DEnvCfg(B1Phase2ActionSpaceEnvCfg):
     """V2: Residual-q 12D with policy-phase observation + randomised duration.
 
     Correction space: q (joint position), action_space=12 (per-joint).
+    Obs 78D: 53D base (with full 12D last_action) + 1 norm_duration + 12 π_current + 12 π_target.
+    Full 12D last_action gives the MLP per-joint correction memory → smoother corrections.
     """
-    observation_space: int = 70
+    observation_space: int = 78
     transition_duration_min_s: float = 1.5
     transition_duration_max_s: float = 5.0
     rew_joint_jerk: float = 0.0
     rew_joint_acc: float = 0.0
-    rew_residual_sparsity: float = -0.5
-    rew_vx_window: float = 2.0
+    rew_residual_sparsity: float = -0.167  # -0.5 * 4/12 — normalised per-dim vs 4D variant
+    rew_vx_window: float = -2.0
+    rew_action_rate: float = -0.5          # stronger smoothness pressure for 12D corrections
+
+
+# V3 configs — V2 + explicit foot contact (4D)
+#
+# Observation:
+#   4D variants:  74D = base(45) + norm_duration(1) + π_current(12) + π_target(12) + foot_contact(4)
+#   12D variants: 82D = base(53) + norm_duration(1) + π_current(12) + π_target(12) + foot_contact(4)
+#
+# Foot contact resolves the stance/swing ambiguity in π_current/π_target:
+# the same joint angle occurs at two points per gait cycle, but contact state
+# is unambiguous. The MLP can now detect phase mismatch between source and
+# target policies and time its corrections accordingly.
+# ---------------------------------------------------------------------------
+
+@configclass
+class B1Phase2V3Alpha4DEnvCfg(B1Phase2V2Alpha4DEnvCfg):
+    """V3: Residual-α 4D — V2 + foot contact (4D). Obs = 74D."""
+    observation_space: int = 74
+
+
+@configclass
+class B1Phase2V3Alpha12DEnvCfg(B1Phase2V2Alpha12DEnvCfg):
+    """V3: Residual-α 12D — V2 + foot contact (4D). Obs = 82D."""
+    observation_space: int = 82
+
+
+@configclass
+class B1Phase2V3Joint4DEnvCfg(B1Phase2V2Joint4DEnvCfg):
+    """V3: Residual-q 4D — V2 + foot contact (4D). Obs = 74D."""
+    observation_space: int = 74
+
+
+@configclass
+class B1Phase2V3Joint12DEnvCfg(B1Phase2V2Joint12DEnvCfg):
+    """V3: Residual-q 12D — V2 + foot contact (4D). Obs = 82D."""
+    observation_space: int = 82

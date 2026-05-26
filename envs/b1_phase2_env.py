@@ -297,11 +297,12 @@ class B1Phase2Env(DirectRLEnv):
         joint_vel = d.joint_vel                                   # (E, 12)
 
         # Phase 2 specific
-        if self._last_residual.shape[1] == 12:
-            # Summarise 12-D residual to 4-D per-leg mean so obs stays at 45-D
+        if self._last_residual.shape[1] == 12 and self.cfg.observation_space < 78:
+            # Summarise 12-D residual to 4-D per-leg mean so obs stays at 45-D base.
+            # V2 12D configs (obs_space=78) skip this and use the full 12D below.
             last_action = self._last_residual.reshape(self.num_envs, 4, 3).mean(dim=2)
         else:
-            last_action = self._last_residual                     # (E, 4)
+            last_action = self._last_residual                     # (E, 4) or (E, 12)
         n_gaits = len(self.cfg.gait_names)
         gait_current_oh = torch.nn.functional.one_hot(self._gait_current, num_classes=n_gaits).float()
         gait_target_oh = torch.nn.functional.one_hot(self._gait_target, num_classes=n_gaits).float()
@@ -353,6 +354,17 @@ class B1Phase2Env(DirectRLEnv):
             obs_parts.append(norm_duration)
             obs_parts.append(self._last_action_current)   # (E, 12) π_current output
             obs_parts.append(self._last_action_target)    # (E, 12) π_target output
+        if self.cfg.observation_space in (74, 82):
+            # V3: add explicit foot contact (4D) on top of V2 obs.
+            # Binary stance/swing per leg resolves the position ambiguity in
+            # π_current/π_target: the same joint angle occurs twice per gait
+            # cycle (swing up vs swing down), but contact state is unambiguous.
+            nf = self._contact_sensor.data.net_forces_w_history  # (E, H, bodies, 3)
+            foot_forces = torch.stack(
+                [nf[:, 0, fid, :] for fid in self._foot_ids], dim=1
+            )  # (E, 4, 3)
+            foot_contact = (torch.norm(foot_forces, dim=-1) > 1.0).float()  # (E, 4)
+            obs_parts.append(foot_contact)
         obs = torch.cat(obs_parts, dim=1)
         return {"policy": obs}
 
@@ -710,3 +722,43 @@ gym.register(
     },
 )
 
+# V3: V2 + explicit foot contact (4D) — resolves stance/swing ambiguity
+gym.register(
+    id="Isaac-B1-Phase2-V3-Alpha4D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V3Alpha4DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V3Alpha4DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V3-Alpha12D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V3Alpha12DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V3Alpha12DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V3-Joint4D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V3Joint4DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V3Joint4DPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-B1-Phase2-V3-Joint12D-v0",
+    entry_point="envs.b1_phase2_env:B1Phase2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "envs.b1_phase2_env_cfg:B1Phase2V3Joint12DEnvCfg",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:Phase2V3Joint12DPPORunnerCfg",
+    },
+)

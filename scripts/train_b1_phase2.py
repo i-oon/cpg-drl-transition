@@ -59,6 +59,8 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2Joint4DPhaseAwareEnvCfg, B1Phase2ActionSpacePhaseAwareEnvCfg,
     B1Phase2V2Alpha4DEnvCfg, B1Phase2V2Alpha12DEnvCfg,
     B1Phase2V2Joint4DEnvCfg, B1Phase2V2Joint12DEnvCfg,
+    B1Phase2V3Alpha4DEnvCfg, B1Phase2V3Alpha12DEnvCfg,
+    B1Phase2V3Joint4DEnvCfg, B1Phase2V3Joint12DEnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import (
     Phase2PPORunnerCfg, Phase2E2EPPORunnerCfg,
@@ -68,6 +70,8 @@ from envs.b1_velocity_ppo_cfg import (
     Phase2Joint4DPhaseAwarePPORunnerCfg, Phase2ActionSpacePhaseAwarePPORunnerCfg,
     Phase2V2Alpha4DPPORunnerCfg, Phase2V2Alpha12DPPORunnerCfg,
     Phase2V2Joint4DPPORunnerCfg, Phase2V2Joint12DPPORunnerCfg,
+    Phase2V3Alpha4DPPORunnerCfg, Phase2V3Alpha12DPPORunnerCfg,
+    Phase2V3Joint4DPPORunnerCfg, Phase2V3Joint12DPPORunnerCfg,
 )
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
@@ -89,6 +93,11 @@ _task_cfg_map = {
     "Isaac-B1-Phase2-V2-Alpha12D-v0": (Phase2V2Alpha12DPPORunnerCfg, B1Phase2V2Alpha12DEnvCfg),
     "Isaac-B1-Phase2-V2-Joint4D-v0":  (Phase2V2Joint4DPPORunnerCfg,  B1Phase2V2Joint4DEnvCfg),
     "Isaac-B1-Phase2-V2-Joint12D-v0": (Phase2V2Joint12DPPORunnerCfg, B1Phase2V2Joint12DEnvCfg),
+    # V3: V2 + explicit foot contact (4D) — stance/swing phase signal
+    "Isaac-B1-Phase2-V3-Alpha4D-v0":  (Phase2V3Alpha4DPPORunnerCfg,  B1Phase2V3Alpha4DEnvCfg),
+    "Isaac-B1-Phase2-V3-Alpha12D-v0": (Phase2V3Alpha12DPPORunnerCfg, B1Phase2V3Alpha12DEnvCfg),
+    "Isaac-B1-Phase2-V3-Joint4D-v0":  (Phase2V3Joint4DPPORunnerCfg,  B1Phase2V3Joint4DEnvCfg),
+    "Isaac-B1-Phase2-V3-Joint12D-v0": (Phase2V3Joint12DPPORunnerCfg, B1Phase2V3Joint12DEnvCfg),
 }
 
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -199,7 +208,7 @@ print(f"  Device        : {agent_cfg.device}")
 # ---------------------------------------------------------------------------
 
 run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-log_dir = Path(__file__).parent.parent / "logs" / "phase2" / run_name
+log_dir = Path(__file__).parent.parent / "logs" / "phase2_new_approach" / run_name
 log_dir.mkdir(parents=True, exist_ok=True)
 print(f"  Log dir       : {log_dir.resolve()}\n")
 

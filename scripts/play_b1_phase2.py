@@ -60,6 +60,10 @@ parser.add_argument("--cam_lookat", type=str, default="0.0,0.0,0.5",
                     help="Camera lookat offset from tracked robot (x,y,z) [m].")
 parser.add_argument("--seed", type=int, default=42,
                     help="RNG seed for env domain randomization. Fix across baselines for fair comparison.")
+parser.add_argument("--transition_duration_s", type=float, default=None,
+                    help="Pin transition duration to a fixed value (overrides min/max in env cfg). "
+                         "Use 3.0 for canonical evaluation. Omit to use cfg defaults (randomised "
+                         "for V2 configs). Must be set for fair cross-method comparison.")
 parser.add_argument("--randomize_start", action="store_true",
                     help="Sample transition_start_s from the training range [transition_start_min_s, "
                          "transition_start_max_s] at each gait switch instead of pinning to 2.0 s. "
@@ -100,6 +104,10 @@ from envs.b1_phase2_env_cfg import (
     B1Phase2ActionSpaceEnvCfg, B1Phase2Joint4DEnvCfg, B1Phase2Alpha12DEnvCfg,
     B1Phase2Alpha12DPhaseAwareEnvCfg, B1Phase2Alpha4DPhaseAwareEnvCfg,
     B1Phase2Joint4DPhaseAwareEnvCfg, B1Phase2ActionSpacePhaseAwareEnvCfg,
+    B1Phase2V2Alpha4DEnvCfg, B1Phase2V2Alpha12DEnvCfg,
+    B1Phase2V2Joint4DEnvCfg, B1Phase2V2Joint12DEnvCfg,
+    B1Phase2V3Alpha4DEnvCfg, B1Phase2V3Alpha12DEnvCfg,
+    B1Phase2V3Joint4DEnvCfg, B1Phase2V3Joint12DEnvCfg,
 )
 from envs.b1_velocity_ppo_cfg import (
     Phase2PPORunnerCfg, Phase2E2EPPORunnerCfg,
@@ -107,6 +115,10 @@ from envs.b1_velocity_ppo_cfg import (
     Phase2ActionSpacePPORunnerCfg, Phase2Joint4DPPORunnerCfg, Phase2Alpha12DPPORunnerCfg,
     Phase2Alpha12DPhaseAwarePPORunnerCfg, Phase2Alpha4DPhaseAwarePPORunnerCfg,
     Phase2Joint4DPhaseAwarePPORunnerCfg, Phase2ActionSpacePhaseAwarePPORunnerCfg,
+    Phase2V2Alpha4DPPORunnerCfg, Phase2V2Alpha12DPPORunnerCfg,
+    Phase2V2Joint4DPPORunnerCfg, Phase2V2Joint12DPPORunnerCfg,
+    Phase2V3Alpha4DPPORunnerCfg, Phase2V3Alpha12DPPORunnerCfg,
+    Phase2V3Joint4DPPORunnerCfg, Phase2V3Joint12DPPORunnerCfg,
 )
 from isaaclab.envs.common import ViewerCfg
 
@@ -128,6 +140,16 @@ _task_cfg_map = {
     "Isaac-B1-Phase2-Alpha4D-PhaseAware-v0":     (Phase2Alpha4DPhaseAwarePPORunnerCfg,    B1Phase2Alpha4DPhaseAwareEnvCfg),
     "Isaac-B1-Phase2-Joint4D-PhaseAware-v0":     (Phase2Joint4DPhaseAwarePPORunnerCfg,    B1Phase2Joint4DPhaseAwareEnvCfg),
     "Isaac-B1-Phase2-ActionSpace-PhaseAware-v0": (Phase2ActionSpacePhaseAwarePPORunnerCfg, B1Phase2ActionSpacePhaseAwareEnvCfg),
+    # V2: policy-phase observation + randomised duration + bidirectional alpha
+    "Isaac-B1-Phase2-V2-Alpha4D-v0":  (Phase2V2Alpha4DPPORunnerCfg,  B1Phase2V2Alpha4DEnvCfg),
+    "Isaac-B1-Phase2-V2-Alpha12D-v0": (Phase2V2Alpha12DPPORunnerCfg, B1Phase2V2Alpha12DEnvCfg),
+    "Isaac-B1-Phase2-V2-Joint4D-v0":  (Phase2V2Joint4DPPORunnerCfg,  B1Phase2V2Joint4DEnvCfg),
+    "Isaac-B1-Phase2-V2-Joint12D-v0": (Phase2V2Joint12DPPORunnerCfg, B1Phase2V2Joint12DEnvCfg),
+    # V3: V2 + explicit foot contact (4D)
+    "Isaac-B1-Phase2-V3-Alpha4D-v0":  (Phase2V3Alpha4DPPORunnerCfg,  B1Phase2V3Alpha4DEnvCfg),
+    "Isaac-B1-Phase2-V3-Alpha12D-v0": (Phase2V3Alpha12DPPORunnerCfg, B1Phase2V3Alpha12DEnvCfg),
+    "Isaac-B1-Phase2-V3-Joint4D-v0":  (Phase2V3Joint4DPPORunnerCfg,  B1Phase2V3Joint4DEnvCfg),
+    "Isaac-B1-Phase2-V3-Joint12D-v0": (Phase2V3Joint12DPPORunnerCfg, B1Phase2V3Joint12DEnvCfg),
 }
 _runner_cls, _env_cls = _task_cfg_map.get(
     args.task, (Phase2PPORunnerCfg, B1Phase2EnvCfg)
@@ -149,6 +171,12 @@ if args.legacy_4gait:
         "logs/phase1_final/steer.pt",
     )
     print("  [legacy_4gait] obs=47, gaits=trot/bound/pace/steer")
+
+# Pin transition duration for fair cross-method comparison
+if args.transition_duration_s is not None:
+    env_cfg.transition_duration_min_s = args.transition_duration_s
+    env_cfg.transition_duration_max_s = args.transition_duration_s
+    print(f"  [transition_duration] pinned to {args.transition_duration_s}s")
 
 # Validate args
 if args.baseline is None and args.checkpoint is None:

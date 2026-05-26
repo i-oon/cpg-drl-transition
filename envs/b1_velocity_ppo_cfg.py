@@ -212,3 +212,27 @@ class Phase2V2Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
 class Phase2V2Joint12DPPORunnerCfg(Phase2PPORunnerCfg):
     """V2: Residual-q 12D, policy-phase obs, randomised duration."""
     experiment_name = "b1_phase2_v2_joint_12d"
+
+
+@configclass
+class Phase2V3Alpha4DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V3: Residual-α 4D — V2 + foot contact obs."""
+    experiment_name = "b1_phase2_v3_alpha_4d"
+
+
+@configclass
+class Phase2V3Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V3: Residual-α 12D — V2 + foot contact obs."""
+    experiment_name = "b1_phase2_v3_alpha_12d"
+
+
+@configclass
+class Phase2V3Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V3: Residual-q 4D — V2 + foot contact obs."""
+    experiment_name = "b1_phase2_v3_joint_4d"
+
+
+@configclass
+class Phase2V3Joint12DPPORunnerCfg(Phase2PPORunnerCfg):
+    """V3: Residual-q 12D — V2 + foot contact obs."""
+    experiment_name = "b1_phase2_v3_joint_12d"

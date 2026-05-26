@@ -36,7 +36,7 @@ from isaaclab.utils import configclass
 
 from isaaclab_assets.robots.unitree import UNITREE_B1_CFG
 
-# Project-local B1 config with correct actuator tuning for 50 kg body.
+# Project-local B1 config with correct actuator tuning for B1 (~63 kg per URDF).
 # deepcopy prevents mutating the shared isaaclab_assets cfg.
 _UNITREE_B1_CFG = copy.deepcopy(UNITREE_B1_CFG)
 _UNITREE_B1_CFG.actuators["base_legs"].stiffness = 400.0   # 200 sags 9 cm under body weight
