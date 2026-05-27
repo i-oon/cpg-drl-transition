@@ -642,6 +642,7 @@ This 1/T² scaling explains three observations in the plot:
 1. **Smoothstep jerk drops at longer T** — it's geometric, not learned. Halving duration quadruples α̈_max and therefore jerk.
 2. **Short transitions are catastrophic even with Smoothstep** — at T=1.5s, α̈_max is 4× higher than at T=3s. No fixed schedule can avoid this.
 3. **Action-q jerk is flat across durations** — Action-q corrects in joint space directly, bypassing the α̈·Δq term entirely, so it does not benefit from longer T the way schedule-based methods do.
+4. **Smoothstep and Schedule-α exhibit a jerk–Δvx_trans trade-off along the T axis** — longer T lowers jerk (via 1/T²) but raises Δvx_trans, because the robot spends more time in the intermediate blend state and cannot sustain target velocity throughout. This trade-off is intrinsic to any time-parameterised schedule. Action-q sidesteps it: correcting in joint space means vx is actively held regardless of where T sits on the jerk–safety curve, so its jerk and Δvx_trans curves are both flat across durations.
 
 **N=60 Multi-Seed Evaluation:** Available only for Experiment A variants (7 methods total including baselines). The N=60 evaluation was not run for Experiment B. Treat Experiment B results as seed=42 only.
 
