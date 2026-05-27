@@ -19,6 +19,8 @@ build/
 *.log
 *.tmp
 
-logs/
-interesting_guide.md
-CLAUDE.md
+logs/phase2_new_approach
+logs/phase2_seed_experiment_A/residual_alpha_4d_sp05_jw2
+logs/phase2_seed_experiment_A/residual_alpha_12d
+logs/phase2_seed_experiment_A/residual_q_4d_sp05_jw2
+logs/phase2_seed_experiment_A/residual_q_12d_sp05_jw2
