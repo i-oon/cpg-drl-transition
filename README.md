@@ -704,6 +704,20 @@ Best result: Schedule-α 12D, jerk_TRANS = 8320 (−2.3% vs Smoothstep 8508), 0/
 
 *Inspired by Silver et al. (2018): the trained Exp A Sched-α 12D MLP is swapped to run on top of a linear-ramp base (no retraining). With the correct Smoothstep base: −2.2% jerk. With the wrong linear-ramp base: +12.3% jerk — corrections misfire on 4/6 gait pairs. This shows the MLP is Smoothstep-calibrated, not a general transition controller.*
 
+### Base-Swap Validation (Experiment B)
+
+![Base-swap validation Exp B](logs/phase2_v3/base_swap_expB.png)
+
+*Same architecture as Exp A (Sched-α 12D), trained with vx-window penalty instead of jerk penalty. With the correct Smoothstep base: +16.0% jerk. With the wrong linear-ramp base: +38.9% jerk — misfires on 5/6 gait pairs. Both experiments are Smoothstep-specific, but for different reasons:*
+
+| | Exp A (jerk penalty) | Exp B (vx-window penalty) |
+|---|---:|---:|
+| SS base + MLP vs SS base | −2.2% jerk | +16.0% jerk |
+| LR base + MLP vs LR base | +12.3% jerk | +38.9% jerk |
+| MLP behaviour | Conservative — near-zero Δα | Aggressive — pushes α > 1.0 to hold vx |
+
+*Exp A's jerk reward suppressed MLP intervention (near-static attractor) — little room to improve or misfire. Exp B's vx-window reward encouraged aggressive corrections that raise jerk even on the correct base, and raise it far more on the wrong base. The α > 1.0 overshoot visible in Panel A is the MLP over-blending to maintain forward velocity. Both MLPs are Smoothstep-calibrated; Exp B's corrections are simply stronger.*
+
 ### Experiment B Results (seed=42, canonical)
 
 ![Transition comparison: Smoothstep reversal vs Exp B](logs/phase2_v3/transition_zoom_comparison.png)
