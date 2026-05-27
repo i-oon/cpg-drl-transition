@@ -28,6 +28,18 @@
 
 ## 1. Project Overview
 
+**Experiment B — residual learning on top of Smoothstep (seed=42, all 6 directed gait-pair transitions, 3 s blend):**
+
+| Schedule Residual 4D | Schedule Residual 12D |
+|:---:|:---:|
+| ![Exp B Sched-α 4D](logs/phase2_v3/videos/expB_sched_alpha_4d/transition.gif) | ![Exp B Sched-α 12D](logs/phase2_v3/videos/expB_sched_alpha_12d/transition.gif) |
+| **Action Residual 4D** | **Action Residual 12D** |
+| ![Exp B Action-q 4D](logs/phase2_v3/videos/expB_action_q_4d/transition.gif) | ![Exp B Action-q 12D](logs/phase2_v3/videos/expB_action_q_12d/transition.gif) |
+
+*All four variants maintain positive forward velocity throughout every transition. Smoothstep baseline (no learning) reverses direction on 3 of 6 pairs. Details in Section 7 and Section 9.*
+
+---
+
 ### Act 1 — The Problem
 
 Trot, bound, and pace have fundamentally different leg-pair coordination structures:
@@ -309,7 +321,7 @@ Both modes share the same PPO training loop, same network depth, and same observ
 **Schedule Residual (Δα mode):**
 
 ```python
-# V2: bidirectional — MLP can delay (Δα < 0) or advance (Δα > 0)
+# Experiment B: bidirectional — MLP can delay (Δα < 0) or advance (Δα > 0)
 delta_alpha = tanh(actions) * delta_alpha_max     # ∈ [−0.3, +0.3]
 delta_alpha *= in_transition_window               # gated: zero outside window
 
@@ -328,7 +340,7 @@ joint_target = q_default + 0.25 * blended
 **Action Residual (Δq mode):**
 
 ```python
-# V2: bidirectional — MLP adds or subtracts from blended command
+# Experiment B: bidirectional — MLP adds or subtracts from blended command
 delta_q   = tanh(actions) * delta_q_max           # ∈ [−0.25, +0.25] rad
 delta_q  *= in_transition_window
 
@@ -340,7 +352,7 @@ for j in 0..11:
 joint_target = q_default + 0.25 * (blended + delta_q)
 ```
 
-### 2×2 Design Space (V2)
+### 2×2 Design Space (Experiment B)
 
 |  | **4D** (per-leg scalar) | **12D** (per-joint) |
 |---|---|---|
@@ -488,19 +500,14 @@ After establishing a working residual recipe, two design dimensions remained ope
 
 ### 2×2 Design Space (see also Section 3)
 
-**Policy-output obs** (`Isaac-B1-Phase2-V2-*`):
+Final Experiment B design — contact-phase observation (policy-output obs + binary foot contact):
 
 |  | **4D** (per-leg scalar) | **12D** (per-joint) |
 |---|---|---|
-| **Schedule Residual (Δα)** | `Isaac-B1-Phase2-V2-Alpha4D-v0` | `Isaac-B1-Phase2-V2-Alpha12D-v0` |
-| **Action Residual (Δq)** | `Isaac-B1-Phase2-V2-Joint4D-v0` | `Isaac-B1-Phase2-V2-Joint12D-v0` |
+| **Schedule Residual (Δα)** | `Isaac-B1-Phase2-V3-Alpha4D-v0` | `Isaac-B1-Phase2-V3-Alpha12D-v0` |
+| **Action Residual (Δq)** | `Isaac-B1-Phase2-V3-Joint4D-v0` | `Isaac-B1-Phase2-V3-Joint12D-v0` |
 
-**Contact-phase obs** (`Isaac-B1-Phase2-V3-*`):
-
-|  | **4D** | **12D** |
-|---|---|---|
-| **Schedule Residual** | `Isaac-B1-Phase2-V3-Alpha4D-v0` | `Isaac-B1-Phase2-V3-Alpha12D-v0` |
-| **Action Residual** | `Isaac-B1-Phase2-V3-Joint4D-v0` | `Isaac-B1-Phase2-V3-Joint12D-v0` |
+*An intermediate variant using policy-output observation only (without foot contact) was also trained and is included in the results below for comparison. Checkpoints at `logs/phase2_new_approach/*_v2/`.*
 
 **Why 4D per-leg is still included:** Broadcasting one scalar to all three joints per leg maintains intra-leg kinematic consistency (hip, thigh, calf all move together). This is physically simpler but less expressive. For schedule residual, it means all joints in one leg transition at the same rate — the robot cannot independently delay the hip while advancing the knee.
 
@@ -617,6 +624,24 @@ No jerk penalty. vx-window penalty (−2.0), bidirectional tanh, policy-phase ob
 ![Duration sweep — Exp B pol-out obs](logs/phase2_v3/v2_duration_sweep.png)
 
 *Left: jerk vs duration. Right: Δvx vs duration. Action-q 12D maintains low Δvx across all durations. Smoothstep jerk (orange dashed) decreases at longer durations — both baselines and residual variants improve with slower transitions.*
+
+**Why Smoothstep jerk scales with duration — and why short durations are catastrophic:**
+
+The dominant jerk source in the blending equation is α̈ · Δq (blending acceleration × phase gap). For Smoothstep, the maximum second derivative is:
+
+$$\ddot{\alpha}_{\max} = \frac{6}{T^2}$$
+
+| Duration T | α̈_max | Relative to T=3s |
+|---|---|---|
+| 5.0 s | 0.24 rad/s² per rad | 0.36× |
+| 3.0 s | 0.67 rad/s² per rad | 1× (baseline) |
+| 1.5 s | 2.67 rad/s² per rad | 4× |
+| 0.5 s | 24.0 rad/s² per rad | 36× |
+
+This 1/T² scaling explains three observations in the plot:
+1. **Smoothstep jerk drops at longer T** — it's geometric, not learned. Halving duration quadruples α̈_max and therefore jerk.
+2. **Short transitions are catastrophic even with Smoothstep** — at T=1.5s, α̈_max is 4× higher than at T=3s. No fixed schedule can avoid this.
+3. **Action-q jerk is flat across durations** — Action-q corrects in joint space directly, bypassing the α̈·Δq term entirely, so it does not benefit from longer T the way schedule-based methods do.
 
 **N=60 Multi-Seed Evaluation:** Available only for Experiment A variants (7 methods total including baselines). The N=60 evaluation was not run for Experiment B. Treat Experiment B results as seed=42 only.
 
@@ -881,25 +906,25 @@ python scripts/train_b1_velocity.py --headless --num_envs 4096 \
     --max_iterations 4000 --run_name pace_v2
 ```
 
-### Phase 2 — Train V2 Design-Space Study
+### Phase 2 — Train Experiment B (Policy-Output Observation)
 
 ```bash
-# Schedule-α 4D V2 (bidirectional, policy-phase obs, duration rand)
+# Schedule-α 4D (bidirectional, policy-output obs, duration rand)
 python scripts/train_b1_phase2.py --headless --num_envs 1024 \
     --task Isaac-B1-Phase2-V2-Alpha4D-v0 \
     --max_iterations 2000 --seed 42
 
-# Schedule-α 12D V2
+# Schedule-α 12D (policy-output obs)
 python scripts/train_b1_phase2.py --headless --num_envs 1024 \
     --task Isaac-B1-Phase2-V2-Alpha12D-v0 \
     --max_iterations 2000 --seed 42
 
-# Action-q 4D V2
+# Action-q 4D (policy-output obs)
 python scripts/train_b1_phase2.py --headless --num_envs 1024 \
     --task Isaac-B1-Phase2-V2-Joint4D-v0 \
     --max_iterations 2000 --seed 42
 
-# Action-q 12D V2
+# Action-q 12D (policy-output obs)
 python scripts/train_b1_phase2.py --headless --num_envs 1024 \
     --task Isaac-B1-Phase2-V2-Joint12D-v0 \
     --max_iterations 2000 --seed 42
@@ -907,7 +932,7 @@ python scripts/train_b1_phase2.py --headless --num_envs 1024 \
 
 Checkpoints saved to `logs/phase2_new_approach/<run_name>/model_final.pt`.
 
-### Phase 2 — Train Experiment B Contact-Phase (V3)
+### Phase 2 — Train Experiment B (Contact-Phase Observation, Final)
 
 ```bash
 # All 4 contact-phase variants sequentially (~3 hrs)
@@ -924,7 +949,7 @@ Checkpoints: `logs/phase2_new_approach/{schedule,action}_residual_{4d,12d}_v3/mo
 ### Phase 2 — Canonical Playback (seed=42, all Experiment B variants)
 
 ```bash
-# Run all 4 V3 (contact-phase) canonical playbacks at once
+# Run all 4 contact-phase obs canonical playbacks at once
 bash scripts/playback_v3.sh
 
 # Single variant — pin duration to 3.0s for fair comparison
