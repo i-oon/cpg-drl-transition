@@ -32,9 +32,9 @@
 
 | Schedule Residual 4D | Schedule Residual 12D |
 |:---:|:---:|
-| ![Exp B Sched-α 4D](logs/phase2_v3/videos/expB_sched_alpha_4d/transition.gif) | ![Exp B Sched-α 12D](logs/phase2_v3/videos/expB_sched_alpha_12d/transition.gif) |
+| ![Exp B Sched-α 4D](videos/expB_sched_alpha_4d/transition.gif) | ![Exp B Sched-α 12D](videos/expB_sched_alpha_12d/transition.gif) |
 | **Action Residual 4D** | **Action Residual 12D** |
-| ![Exp B Action-q 4D](logs/phase2_v3/videos/expB_action_q_4d/transition.gif) | ![Exp B Action-q 12D](logs/phase2_v3/videos/expB_action_q_12d/transition.gif) |
+| ![Exp B Action-q 4D](videos/expB_action_q_4d/transition.gif) | ![Exp B Action-q 12D](videos/expB_action_q_12d/transition.gif) |
 
 *All four variants maintain positive forward velocity throughout every transition. Smoothstep baseline (no learning) reverses direction on 3 of 6 pairs. Details in Section 7 and Section 9.*
 
