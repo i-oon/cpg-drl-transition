@@ -615,10 +615,6 @@ No jerk penalty. vx-window penalty (−2.0), bidirectional tanh, policy-phase ob
 
 **Canonical Evaluation (seed=42):** Fixed seed, 6 gait-pair transitions (trot→bound→pace→trot→pace→bound), 2500 steps, 8 s per segment.
 
-**Multi-Seed Robustness Evaluation (N=60):** 10 seeds × 6 gait pairs, `--randomize_start`. Different seeds hit the switch at different gait phases. Two bugs were fixed before this evaluation was valid:
-1. IsaacLab resets numpy's global RNG during env init — fixed by using an isolated `np.random.default_rng(seed)` generator
-2. Discrete baseline had `_transition_start_steps` hardcoded to `int(2.0/dt)` — fixed by using `_current_hold_s`
-
 **Duration Sweep:** For each Experiment B (policy-output obs) variant, evaluate at pinned durations (1.5, 2.0, 3.0, 4.0, 5.0 s) using `--transition_duration_s`. Tests generalization of models trained on Uniform[1.5, 5.0] s. **Not available for Experiment B (contact-phase obs) or Experiment A variants.** See `logs/duration_sweep/`.
 
 ![Duration sweep — Exp B pol-out obs](logs/phase2_v3/v2_duration_sweep.png)
@@ -643,8 +639,6 @@ This 1/T² scaling explains three observations in the plot:
 2. **Short transitions are catastrophic even with Smoothstep** — at T=1.5s, α̈_max is 4× higher than at T=3s. No fixed schedule can avoid this.
 3. **Action-q jerk is flat across durations** — Action-q corrects in joint space directly, bypassing the α̈·Δq term entirely, so it does not benefit from longer T the way schedule-based methods do.
 4. **Smoothstep and Schedule-α exhibit a jerk–Δvx_trans trade-off along the T axis** — longer T lowers jerk (via 1/T²) but raises Δvx_trans, because the robot spends more time in the intermediate blend state and cannot sustain target velocity throughout. This trade-off is intrinsic to any time-parameterised schedule. Action-q sidesteps it: correcting in joint space means vx is actively held regardless of where T sits on the jerk–safety curve, so its jerk and Δvx_trans curves are both flat across durations.
-
-**N=60 Multi-Seed Evaluation:** Available only for Experiment A variants (7 methods total including baselines). The N=60 evaluation was not run for Experiment B. Treat Experiment B results as seed=42 only.
 
 ---
 
@@ -807,7 +801,6 @@ No method occupies the lower-left corner (low jerk AND low Δvx). Experiment A p
 
 - **Reward design is the dominant factor.** Jerk penalty → near-static attractor (Exp A). vx-window penalty → active velocity protection but higher jerk (Exp B). The reward determines what the MLP learns, independent of architecture.
 - **Action residual outperforms schedule residual on velocity safety**, at seed=42, once the reward is correctly specified. Direct per-joint correction is more effective than timing correction for phase-misaligned transitions.
-- **Evaluation diversity is required.** Seed=42 is one phase configuration. Multi-seed N=60 was run for Experiment A; not run for Experiment B — Experiment B results should be treated as preliminary.
 - **Observation design and reward design must be co-designed.** Adding foot contact without changing the reward is not enough; the reward must give the MLP an incentive to use the additional information.
 
 ### Three Questions Answered
@@ -872,7 +865,7 @@ Sim-to-real transfer requires: (a) base policy sim-to-real, (b) verification tha
 2. Add policy-phase state to the observation from the start, combined with an explicit jerk reward
 3. Train across multiple transition durations from day 1
 4. Use multi-objective reward that jointly optimizes jerk, CoT, and velocity safety
-5. Evaluate across diverse gait-phase conditions from day 1 — N=6 is insufficient
+5. Evaluate across diverse gait-phase conditions from day 1
 6. Raise K_p to 600 N·m/rad
 
 ---
@@ -886,10 +879,6 @@ The answer depends on what *smooth* means for a 63 kg quadruped. Jerk measures k
 **Q2: Why not use AllGaits instead of frozen-policy blending?**
 
 Frozen-policy blending is a realistic deployment constraint: you may have trained specialist gaits and want to transition between them without retraining. The architectural lesson — that the blending problem has a theoretical ceiling at Δπ(0) (Section 2) that no bounded residual correction can eliminate — is a valuable finding regardless of architecture. AllGaits removes the ceiling by training across all gait-phase states, but this project's contribution is precisely demonstrating *where that ceiling is* and *why fixed schedules are already strong*. Section 11 discusses AllGaits as the correct long-term direction.
-
-**Q3: Experiment B has only seed=42 — how reliable are the results?**
-
-Directly: Experiment B results should be treated as preliminary. Multi-seed N=60 robustness was run for Experiment A but not for Experiment B — this is clearly stated in Section 8 and Section 12. At seed=42, all 8 Experiment B variants achieve 0/6 reversals, which is a consistent pattern (not a single-run artifact). But whether this holds across diverse gait-phase conditions at switch time is untested. N=60 for Experiment B is listed as explicit future work.
 
 ---
 
@@ -996,20 +985,6 @@ python scripts/play_b1_phase2.py \
     --save_csv logs/phase2/baselines/linear_ramp/playback_seed42.csv --headless
 ```
 
-### Multi-Seed Robustness (N=60, Experiment A only)
-
-N=60 was run for Experiment A methods (baselines + all 4 residual variants with jerk penalty). Not available for Experiment B.
-
-```bash
-# Experiment A — seed experiment (10 seeds × 6 gait pairs)
-bash scripts/run_seed_experiment_v2.sh
-
-# Analyze results
-python scripts/analyze_seed_experiment.py --mode all --source seeds \
-    --seed_dir logs/phase2_seed_experiment_v2 \
-    --out logs/phase2_seed_experiment_v2/results_all.png
-```
-
 ### Duration Sweep (Experiment B policy-output obs only)
 
 ```bash
@@ -1052,8 +1027,6 @@ cpg-drl-transition/
 │   ├── train_b1_phase2.py          # Train any Phase 2 variant
 │   ├── train_2x2_v3.sh             # Train all 4 V3 variants sequentially
 │   ├── play_b1_phase2.py           # Playback + diagnostic plots + CSV
-│   ├── run_seed_experiment_v2.sh   # Multi-seed N=60
-│   ├── analyze_seed_experiment.py  # per-gait-pair jerk analysis
 │   ├── plot_transition_zoom.py
 │   ├── plot_transition_jerk.py
 │   ├── plot_body_acc_compare.py
