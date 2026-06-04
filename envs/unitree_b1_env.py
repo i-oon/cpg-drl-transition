@@ -581,14 +581,31 @@ class UnitreeB1Env(DirectRLEnv):
               - self.cfg.reward_w_lateral   *  torch.abs(vy)
               - self.cfg.reward_w_stability *  stability * 0.5 * fwd
               - self.cfg.reward_w_contact   *  contact_penalty * 0.5 * fwd
-              - 2.0 * tilt)
+              - 0.5 * tilt)
 
     def _reward_walk(self) -> torch.Tensor:
         return self._reward_simple()
 
 
     def _reward_trot(self) -> torch.Tensor:
-        return self._reward_simple()
+        base = self._reward_simple()
+
+        # Trot phase reward: FL+RR should be in the same contact state, FR+RL in
+        # the same contact state, and the two diagonal pairs in opposite states.
+        # This directly rewards the CPG structure we encoded — without it, PIBB
+        # has no incentive to use diagonal alternation vs all-legs-shuffle.
+        if self._contact_sensor is None or self._foot_ids is None:
+            return base
+
+        ct = self._contact_sensor.data.current_contact_time[:, self._foot_ids]
+        in_stance = (ct > 0).float()   # (N, 4): FL=0, FR=1, RL=2, RR=3
+
+        fl_rr_agree = 1.0 - torch.abs(in_stance[:, 0] - in_stance[:, 3])
+        fr_rl_agree = 1.0 - torch.abs(in_stance[:, 1] - in_stance[:, 2])
+        diag_oppose = torch.abs(in_stance[:, 0] - in_stance[:, 1])
+        trot_score  = fl_rr_agree * fr_rl_agree * diag_oppose
+
+        return base + 0.15 * trot_score
 
     def _reward_pace(self) -> torch.Tensor:
         return self._reward_simple()
