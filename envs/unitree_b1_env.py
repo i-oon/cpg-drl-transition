@@ -36,13 +36,31 @@ from isaaclab.utils import configclass
 
 from isaaclab_assets.robots.unitree import UNITREE_B1_CFG
 
-# Project-local B1 config with correct actuator tuning for B1 (~63 kg per URDF).
-# deepcopy prevents mutating the shared isaaclab_assets cfg.
+# Project-local B1 config. deepcopy prevents mutating the shared isaaclab_assets cfg.
+# Actuator: DCMotorCfg stiffness=400/damping=10 — empirically validated for Isaac Lab B1
+#   (SETUP.md §"Stock UNITREE_B1_CFG needs three overrides").
+#   online-locomotion-rl's Kp=1150 is software PD in FORCE mode with no effort limit —
+#   not equivalent to Isaac Lab ImplicitActuatorCfg; copying those gains causes saturation.
+# Joint defaults: symmetric thighs (0.85 rad all four) eliminate the 0.2 rad front/rear
+#   asymmetry in the stock config that breaks shared-W indirect CPG-RBF encoding.
 _UNITREE_B1_CFG = copy.deepcopy(UNITREE_B1_CFG)
-_UNITREE_B1_CFG.actuators["base_legs"].stiffness = 400.0   # 200 sags 9 cm under body weight
-_UNITREE_B1_CFG.actuators["base_legs"].damping   = 10.0    # proportional to stiffness
-_UNITREE_B1_CFG.init_state.pos = (0.0, 0.0, 0.50)         # feet were 7.7 cm underground at 0.42
-
+_UNITREE_B1_CFG.init_state.pos = (0.0, 0.0, 0.50)
+_UNITREE_B1_CFG.init_state.joint_pos = {
+    "FL_hip_joint":   0.1,
+    "RL_hip_joint":   0.1,
+    "FR_hip_joint":  -0.1,
+    "RR_hip_joint":  -0.1,
+    ".*_thigh_joint": 0.85,
+    ".*_calf_joint":  -1.56,
+}
+_UNITREE_B1_CFG.actuators["base_legs"].stiffness = 400.0
+_UNITREE_B1_CFG.actuators["base_legs"].damping   = 10.0
+# Increase effort limit for CPG-RBF: physical spec (23.7 N·m) leaves only ~4.5 N·m
+# for dynamics after supporting body weight (gravity torque ~19 N·m at thigh=0.85).
+# online-locomotion-rl applies torques without any clipping; 100 N·m matches their
+# effective headroom while keeping stiffness physically grounded.
+_UNITREE_B1_CFG.actuators["base_legs"].effort_limit = 100.0
+_UNITREE_B1_CFG.actuators["base_legs"].saturation_effort = 100.0
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -132,21 +150,22 @@ class UnitreeB1EnvCfg(DirectRLEnvCfg):
     # --- Gait ---
     # Set by make_env_from_config() — do not set manually.
     gait_name: str = "walk"
-    phase_offsets: list = None  # [FL, FR, RL, RR] in radians
+    phase_offsets: list = None  # deprecated — no longer used by _step_cpg_batch
+    # Two-state encoding gait flag (replaces phase_offsets).
+    # False → pace  (FL=RL, FR=RR lateral pairs)
+    # True  → trot  (FL=RR, FR=RL diagonal pairs)
+    cpg_reversed: bool = False
 
-    # --- Reward weights (populated from YAML by make_env_from_config) ---
-    reward_w1: float = 1.0           # Forward velocity tracking
-    reward_w2: float = 0.5           # Orientation (tilt / flat body)
-    reward_w3: float = 0.2           # Height error
-    reward_w4: float = 0.3           # Vertical bounce
-    reward_w_energy: float = 0.01    # Joint velocity penalty
-    reward_w_air_time: float = 0.5   # Air-time variance (prevents 1-leg shuffle)
-    reward_w_action_rate: float = 0.01  # Action smoothness penalty
-    reward_height_nominal: float = 0.42   # B1 standing height (m)
-    reward_target_velocity: float = 0.4   # m/s — target forward speed
+    # --- Reward weights (online-locomotion-rl design) ---
+    reward_w_forward:   float = 1.5   # x_distance weight
+    reward_w_lateral:   float = 1.0   # y_distance weight (applied negative)
+    reward_w_stability: float = 1.0   # stability term weight (applied negative)
+    reward_w_contact:   float = 1.0   # thigh/hip contact term weight (applied negative)
+    reward_height_nominal: float = 0.55  # B1 nominal standing height with 0.85/−1.56 defaults
 
-    # --- Action scaling ---
-    action_scale: float = 0.25           # CPG output × scale → joint offset (matches Isaac Lab convention)
+    # --- Action scaling (online-locomotion-rl: 0.2 general, hip ×0.2 = 0.04) ---
+    action_scale:     float = 0.2    # thigh + calf joint offset scale
+    hip_action_scale: float = 0.04   # hip joint offset scale (lateral splay — smaller range)
 
     # --- Termination ---
     termination_height: float = 0.20     # Fall if body drops below this (m)
@@ -180,13 +199,26 @@ class UnitreeB1Env(DirectRLEnv):
         # ---- Joint permutation (requires PhysX-initialized articulation) ----
         self._build_joint_permutation()
 
+        # ---- Per-joint action scale: hip=0.04, thigh/calf=0.2 (Isaac Lab order) ----
+        _scale_cpg = torch.tensor([
+            self.cfg.hip_action_scale, self.cfg.action_scale, self.cfg.action_scale,
+            self.cfg.hip_action_scale, self.cfg.action_scale, self.cfg.action_scale,
+            self.cfg.hip_action_scale, self.cfg.action_scale, self.cfg.action_scale,
+            self.cfg.hip_action_scale, self.cfg.action_scale, self.cfg.action_scale,
+        ], device=self.device)
+        self._action_scale_vec = _scale_cpg[self._joint_perm]
+
         # ---- Contact sensor body indices ----
         if hasattr(self, "_contact_sensor") and self._contact_sensor is not None:
-            foot_ids, _ = self._contact_sensor.find_bodies(".*_foot$")
+            foot_ids,  _ = self._contact_sensor.find_bodies(".*_foot$")
             thigh_ids, _ = self._contact_sensor.find_bodies(".*_thigh$")
-            base_ids, _ = self._contact_sensor.find_bodies("trunk")
+            hip_ids,   _ = self._contact_sensor.find_bodies(".*_hip$")
+            base_ids,  _ = self._contact_sensor.find_bodies("trunk")
             self._foot_ids = torch.tensor(foot_ids, dtype=torch.long, device=self.device)
-            self._undesired_body_ids = torch.tensor(thigh_ids, dtype=torch.long, device=self.device)
+            # Thigh + hip contact terminates episode (matches online-locomotion-rl)
+            self._undesired_body_ids = torch.tensor(
+                list(thigh_ids) + list(hip_ids), dtype=torch.long, device=self.device
+            )
             self._base_id = torch.tensor(base_ids, dtype=torch.long, device=self.device)
 
         # ---- CPG state (batched across envs) ----
@@ -304,16 +336,7 @@ class UnitreeB1Env(DirectRLEnv):
             kenne[:, i] = np.exp(-(rx**2 + ry**2) / var)
         self._KENNE = torch.from_numpy(kenne).to(self.device)   # (period+1, H)
 
-        # 4. Phase offsets per leg, converted to integer step offsets
-        offsets = self.cfg.phase_offsets or [0.0, math.pi, math.pi/2, 3*math.pi/2]
-        # Convert phase (radians) → step offset (integer)
-        # phase_rad / (2π) gives fraction of cycle, × period → steps
-        leg_step_offsets = [int(round((off / (2.0 * math.pi)) * period)) % period
-                            for off in offsets]
-        self._leg_step_offsets = torch.tensor(leg_step_offsets,
-                                              dtype=torch.long, device=self.device)
-
-        # 5. Phase counter (integer, scalar — same for all envs)
+        # 4. Phase counter (integer, scalar — same for all envs)
         self._phase_idx: int = 0
         # Continuous phi tracked separately for rewards / visualization
         self._phi: float = 0.0
@@ -331,25 +354,60 @@ class UnitreeB1Env(DirectRLEnv):
 
     def _step_cpg_batch(self) -> torch.Tensor:
         """
-        Pre-computed CPG (LocoNets approach) with per-leg phase offsets.
-        Indirect encoding: all 4 legs share the SAME W (20, 3).
-        Per-leg timing comes entirely from integer phase-step offsets.
-        """
-        # Per-leg phase indices: (4,) long in [0, period)
-        leg_idx = (self._phase_idx + self._leg_step_offsets) % self._period
-        rbf_legs = self._KENNE[leg_idx]          # (4, H)
+        Two-state CPG (online-locomotion-rl indirect encoding).
 
-        # Shared W: (E, H, 3) — applied identically to each leg
-        # rbf_legs @ W → (E, 4, 3), then flatten to (E, 12)
-        raw = torch.einsum("kn,enj->ekj", rbf_legs, self._W)   # (E, 4, 3)
-        out = raw.reshape(self._W.shape[0], 12)
-        cpg_flat = torch.tanh(out)
+        Evaluates W at the current phase and at the half-period delayed phase,
+        then interleaves the outputs per joint type across the four legs.
+        This is simpler for PIBB to optimise than the four-offset approach:
+        PIBB must find one W that satisfies two phase relationships, not four.
+
+        Interleaving pattern (matches online-locomotion-rl __rbfn_to_indirect_encoding):
+          hip  (col 0): first leg in each pair = now,  second leg = delayed
+          thigh(col 1): first leg in each pair = delayed, second leg = now
+          calf (col 2): first leg in each pair = now,  second leg = delayed
+
+        cpg_reversed=False → pace  (FL=RL, FR=RR — lateral pairs in phase)
+        cpg_reversed=True  → trot  (FL=RR, FR=RL — diagonal pairs in phase)
+        """
+        # Two RBF evaluations: current and half-period delayed
+        rbf_now = self._KENNE[self._phase_idx]
+        del_idx  = (self._phase_idx + self._period // 2) % self._period
+        rbf_del  = self._KENNE[del_idx]
+
+        # Motor outputs per env: tanh(rbf @ W)  →  (E, 3)
+        motor_now = torch.tanh(torch.einsum("n,enj->ej", rbf_now, self._W))
+        motor_del = torch.tanh(torch.einsum("n,enj->ej", rbf_del, self._W))
+
+        # Second leg-pair uses reversed now/del for trot (diagonal pairs)
+        if self.cfg.cpg_reversed:
+            now2, del2 = motor_del, motor_now
+        else:
+            now2, del2 = motor_now, motor_del
+
+        E   = motor_now.shape[0]
+        out = torch.empty(E, 12, device=self.device)
+
+        # First pair: FL (0-2), FR (3-5)
+        out[:, 0] = motor_now[:, 0]   # FL_hip
+        out[:, 1] = motor_del[:, 1]   # FL_thigh
+        out[:, 2] = motor_now[:, 2]   # FL_calf
+        out[:, 3] = motor_del[:, 0]   # FR_hip
+        out[:, 4] = motor_now[:, 1]   # FR_thigh
+        out[:, 5] = motor_del[:, 2]   # FR_calf
+
+        # Second pair: RL (6-8), RR (9-11)
+        out[:, 6]  = now2[:, 0]       # RL_hip
+        out[:, 7]  = del2[:, 1]       # RL_thigh
+        out[:, 8]  = now2[:, 2]       # RL_calf
+        out[:, 9]  = del2[:, 0]       # RR_hip
+        out[:, 10] = now2[:, 1]       # RR_thigh
+        out[:, 11] = del2[:, 2]       # RR_calf
 
         # Advance integer phase
         self._phase_idx = (self._phase_idx + 1) % self._period
         self._phi += self._delta_phi
 
-        return cpg_flat[:, self._joint_perm]
+        return out[:, self._joint_perm]
 
     # ------------------------------------------------------------------
     # Public PIBB API
@@ -392,9 +450,9 @@ class UnitreeB1Env(DirectRLEnv):
         self._joint_targets = self._step_cpg_batch()  # (num_envs, 12)
 
     def _apply_action(self):
-        """Apply scaled CPG offsets on top of the default standing pose."""
+        """Apply per-joint-scaled CPG offsets on top of the default standing pose."""
         self._robot.set_joint_position_target(
-            self._robot.data.default_joint_pos + self.cfg.action_scale * self._joint_targets
+            self._robot.data.default_joint_pos + self._action_scale_vec * self._joint_targets
         )
 
     def _get_observations(self) -> dict:
@@ -479,44 +537,51 @@ class UnitreeB1Env(DirectRLEnv):
 
     def _reward_simple(self) -> torch.Tensor:
         """
-        Outcome-only reward: velocity + stability + cycling regularity.
-        No gait-specific phase target — coordination emerges from the CPG structure.
+        Reward matching online-locomotion-rl design (Rewards.py):
+          x_distance  +1.5  signed forward progress
+          y_distance  -1.0  absolute lateral drift
+          stability   -1.0  (std_height + tilt) × 0.5 × fwd  — no cost if not moving
+          contacts    -1.0  thigh/hip contact count × 0.5 × fwd
+
+        The stability and contact terms are gated by forward speed so the robot
+        has no incentive to stand still — it only hurts when it's actually moving.
         """
-        vx = self._robot.data.root_lin_vel_b[:, 0]
-        target = self.cfg.reward_target_velocity
-        overshoot = torch.clamp(vx - target, min=0.0)
-        vel_reward = vx - 2.0 * overshoot   # linear up to target, -1 slope above
+        vx   = self._robot.data.root_lin_vel_b[:, 0]
+        vy   = self._robot.data.root_lin_vel_b[:, 1]
+        grav = self._robot.data.projected_gravity_b   # [0,0,-1] when upright
+        h    = self._robot.data.root_pos_w[:, 2]
 
-        flat_orient = torch.sum(torch.square(
-            self._robot.data.projected_gravity_b[:, :2]
-        ), dim=1)
+        # Stability: most negative (best) when upright and at nominal height.
+        # grav_z ≈ -1 upright; becomes less negative when tilted.
+        stability = (1.3 * torch.abs(h - self.cfg.reward_height_nominal)
+                   + 1.3 * grav[:, 0]   # forward/backward tilt
+                   + 1.1 * grav[:, 1]   # lateral tilt
+                   + 1.3 * grav[:, 2])  # ≈ -1 upright, > -1 when tilted
 
-        height = self._robot.data.root_pos_w[:, 2]
-        height_error = torch.abs(height - self.cfg.reward_height_nominal)
+        # Thigh + hip contact (0.02 per step, same scale as online-locomotion-rl)
+        contact_penalty = torch.zeros(self.num_envs, device=self.device)
+        if self._contact_sensor is not None and self._undesired_body_ids is not None:
+            forces = self._contact_sensor.data.net_forces_w_history  # (N, H, B, 3)
+            # Reduce over history (dim=1) and body-ids (dim=1 after first any) → (N,)
+            any_contact = (
+                (torch.norm(forces[:, :, self._undesired_body_ids], dim=-1) > 1.0)
+                .any(dim=1)   # over history  → (N, B_ids)
+                .any(dim=1)   # over body ids → (N,)
+            ).float()
+            contact_penalty = any_contact * 0.02
 
-        lin_vel_z = torch.square(self._robot.data.root_lin_vel_b[:, 2])
+        fwd = torch.clamp(vx, min=0.0)
 
-        action_rate = torch.sum(torch.square(
-            self._joint_targets - self._prev_joint_targets
-        ), dim=1)
+        # Unconditional tilt penalty — always active regardless of forward speed.
+        # The coupled stability*fwd term only fires when moving; without this,
+        # a gradual lean that slows the robot goes unpunished until it falls.
+        tilt = grav[:, 0] ** 2 + grav[:, 1] ** 2   # 0 = upright, 1 = horizontal
 
-        energy = torch.sum(torch.square(self._robot.data.joint_vel), dim=1)
-
-        # Air-time variance — penalise 1-leg shuffle (all 4 feet should cycle at similar rates)
-        air_var = torch.zeros(self.num_envs, device=self.device)
-        if self._contact_sensor is not None and self._foot_ids is not None:
-            foot_ids = self._foot_ids.cpu().tolist() if isinstance(self._foot_ids, torch.Tensor) else list(self._foot_ids)
-            air_times = self._contact_sensor.data.last_air_time[:, foot_ids].float()
-            if air_times.shape[1] >= 2:
-                air_var = air_times.var(dim=1, correction=0)
-
-        return (self.cfg.reward_w1    * vel_reward
-                - self.cfg.reward_w2  * flat_orient
-                - self.cfg.reward_w3  * height_error
-                - self.cfg.reward_w4  * lin_vel_z
-                - self.cfg.reward_w_action_rate * action_rate
-                - self.cfg.reward_w_energy      * energy
-                - self.cfg.reward_w_air_time    * air_var)
+        return (self.cfg.reward_w_forward   *  vx
+              - self.cfg.reward_w_lateral   *  torch.abs(vy)
+              - self.cfg.reward_w_stability *  stability * 0.5 * fwd
+              - self.cfg.reward_w_contact   *  contact_penalty * 0.5 * fwd
+              - 2.0 * tilt)
 
     def _reward_walk(self) -> torch.Tensor:
         return self._reward_simple()
@@ -675,8 +740,9 @@ def make_env_from_config(config_path: str, num_envs: int | None = None) -> Unitr
     env_cfg = UnitreeB1EnvCfg()
 
     # Gait
-    env_cfg.gait_name = cfg_dict["gait"]["name"]
-    env_cfg.phase_offsets = cfg_dict["gait"]["phase_offsets"]
+    env_cfg.gait_name     = cfg_dict["gait"]["name"]
+    env_cfg.cpg_reversed  = cfg_dict["gait"].get("cpg_reversed", False)
+    env_cfg.phase_offsets = cfg_dict["gait"].get("phase_offsets", None)  # deprecated
 
     # CPG
     cpg = cfg_dict.get("cpg", {})
@@ -684,17 +750,13 @@ def make_env_from_config(config_path: str, num_envs: int | None = None) -> Unitr
     env_cfg.cpg_freq = cpg.get("freq_train", 0.3)
     env_cfg.cpg_sigma2 = cfg_dict.get("rbf", {}).get("variance", 0.04)
 
-    # Reward
+    # Reward (online-locomotion-rl design)
     rwd = cfg_dict.get("reward", {})
-    env_cfg.reward_w1 = float(rwd.get("w1_distance", rwd.get("w1_velocity", 1.0)))
-    env_cfg.reward_w2 = float(rwd.get("w2_instability", 0.5))
-    env_cfg.reward_w3 = float(rwd.get("w3_height_error", rwd.get("w3_collision", 0.2)))
-    env_cfg.reward_w4 = float(rwd.get("w4_slippage", 0.3))
-    env_cfg.reward_w_energy = float(rwd.get("w_energy", 0.01))
-    env_cfg.reward_w_air_time = float(rwd.get("w_air_time", 0.5))
-    env_cfg.reward_w_action_rate = float(rwd.get("w_action_rate", 0.01))
-    env_cfg.reward_height_nominal = float(rwd.get("height_nominal", 0.42))
-    env_cfg.reward_target_velocity = float(rwd.get("target_velocity", 0.4))
+    env_cfg.reward_w_forward   = float(rwd.get("w_forward",   1.5))
+    env_cfg.reward_w_lateral   = float(rwd.get("w_lateral",   1.0))
+    env_cfg.reward_w_stability = float(rwd.get("w_stability", 1.0))
+    env_cfg.reward_w_contact   = float(rwd.get("w_contact",   1.0))
+    env_cfg.reward_height_nominal = float(rwd.get("height_nominal", 0.55))
 
     # Episode
     env_cfg.episode_length_s = cfg_dict.get("env", {}).get("episode_length", 500) * env_cfg.sim.dt * env_cfg.decimation

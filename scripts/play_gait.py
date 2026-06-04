@@ -12,7 +12,6 @@ Course: FRA 503 Deep Reinforcement Learning
 """
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
@@ -25,6 +24,18 @@ parser.add_argument("--gait", type=str, default="walk",
 parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--steps", type=int, default=1000,
                     help="Steps to run (1000 = 20s at 50Hz)")
+
+# Use the rendering experience by default — it disables RTX ray tracing and
+# skips omni.kit.hotkeys / omni.kit.menu which crash on this machine's display.
+import sys as _sys
+import os as _os
+_rendering_kit = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)),
+    "..", "..", "IsaacLab", "apps", "isaaclab.python.rendering.kit",
+)
+if "--experience" not in _sys.argv and "--headless" not in _sys.argv:
+    _sys.argv += ["--experience", _os.path.abspath(_rendering_kit)]
+
 args = parser.parse_args()
 app_launcher = AppLauncher(args)
 sim_app = app_launcher.app
@@ -41,14 +52,8 @@ from isaaclab.scene import InteractiveSceneCfg
 # Config
 # ---------------------------------------------------------------------------
 
-PHASE_OFFSETS = {
-    "walk":       [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
-    "walk_fixed": [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
-    "trot":       [0.0, math.pi, math.pi, 0.0],
-    "pace":       [0.0, math.pi, 0.0, math.pi],
-    "bound":      [0.0, 0.0, math.pi, math.pi],
-    "steer":      [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
-}
+# Gaits that use cpg_reversed=True (diagonal pairs: FL+RR, FR+RL)
+CPG_REVERSED = {"trot"}
 
 WEIGHTS_PATH = {
     "walk":       "weights/W_walk.npy",
@@ -72,7 +77,7 @@ if not weights_file.exists():
 
 cfg = UnitreeB1EnvCfg()
 cfg.gait_name = "walk" if args.gait == "walk_fixed" else args.gait
-cfg.phase_offsets = PHASE_OFFSETS[args.gait]
+cfg.cpg_reversed = args.gait in CPG_REVERSED
 cfg.scene = InteractiveSceneCfg(num_envs=args.num_envs, env_spacing=2.5, replicate_physics=True)
 
 env = UnitreeB1Env(cfg)

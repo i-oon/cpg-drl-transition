@@ -158,8 +158,12 @@ class PIBBTrainer:
             W: (num_slots, num_rbf, 3) optimised weight matrix.
         """
         best_reward = -np.inf
+        best_eval_reward = -np.inf   # best reward of clean W (no noise)
         reward_history: list[float] = []
         iter_times: list[float] = []
+
+        eval_interval: int = self.cfg.get("pibb", {}).get("eval_interval", 25)
+        eval_path = self.weights_path.with_stem(self.weights_path.stem + "_eval_best")
 
         self._print_header()
 
@@ -194,6 +198,18 @@ class PIBBTrainer:
             if new_best:
                 best_reward = mean_r
                 np.save(self.weights_path, self.W)
+
+            # --- Periodic clean-W evaluation (no noise) ---
+            # Saves W_eval_best.npy — the W whose unperturbed rollout is strongest.
+            # This fixes the gap between training R (noisy W) and playback R (clean W).
+            if iteration % eval_interval == 0:
+                self.env.set_weights(self.W)
+                eval_rewards = self._run_episode()
+                eval_mean = float(eval_rewards.mean())
+                if eval_mean > best_eval_reward:
+                    best_eval_reward = eval_mean
+                    np.save(eval_path, self.W)
+                    logger.info("  >> eval_best saved (R_eval=%.3f) → %s", eval_mean, eval_path)
 
             # --- Terminal log every iteration ---
             eta_s = self._eta(iter_times, iteration, self.max_iterations)
@@ -285,6 +301,15 @@ class PIBBTrainer:
         # perturbations: (num_envs, 20, 3), p: (num_envs,)
         delta_W = (p[:, None, None] * perturbations).sum(axis=0)   # (20, 3)
         self.W += delta_W
+
+        # Hard norm cap: keep W in the regime where tanh is not saturated.
+        # At W_norm >> 2, tanh(rbf_now @ W) ≈ tanh(rbf_del @ W) ≈ ±1 for both
+        # phase states → motor_now ≈ motor_del → no phase difference → hopping.
+        # Cap prevents PIBB from growing W into the saturated regime.
+        max_w_norm = float(self.cfg.get("pibb", {}).get("max_w_norm", 2.0))
+        w_norm = float(np.linalg.norm(self.W))
+        if w_norm > max_w_norm:
+            self.W *= max_w_norm / w_norm
 
     def _has_converged(self, reward_history: list[float], window: int = 50) -> bool:
         """Return True when reward variance over the last `window` iters is tiny."""

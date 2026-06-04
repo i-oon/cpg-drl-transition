@@ -46,6 +46,7 @@ def _build_isaaclab_mocks():
     """
     prefixes = [
         "isaaclab",
+        "isaaclab.actuators",
         "isaaclab.sim",
         "isaaclab.assets",
         "isaaclab.envs",
@@ -81,7 +82,13 @@ def _build_isaaclab_mocks():
 
     sys.modules["isaaclab.sim"].SimulationCfg = SimulationCfg
     sys.modules["isaaclab.sim"].RigidBodyMaterialCfg = MagicMock(return_value=None)
+    sys.modules["isaaclab.sim"].RigidBodyPropertiesCfg = MagicMock(return_value=None)
+    sys.modules["isaaclab.sim"].ArticulationRootPropertiesCfg = MagicMock(return_value=None)
+    sys.modules["isaaclab.sim"].UrdfFileCfg = MagicMock(return_value=None)
     sys.modules["isaaclab.sim"].DomeLightCfg = MagicMock()
+
+    # Stub ImplicitActuatorCfg
+    sys.modules["isaaclab.actuators"].ImplicitActuatorCfg = MagicMock(return_value=MagicMock())
 
     # Stub ArticulationCfg
     class _ActuatorCfg:
@@ -89,12 +96,17 @@ def _build_isaaclab_mocks():
         damping = 5.0
 
     class _InitStateCfg:
-        pos = (0.0, 0.0, 0.42)
+        def __init__(self, pos=(0.0, 0.0, 0.42), joint_pos=None, joint_vel=None):
+            self.pos = pos
+            self.joint_pos = joint_pos or {}
+            self.joint_vel = joint_vel or {}
 
     class ArticulationCfg:
-        def __init__(self):
-            self.actuators = {"base_legs": _ActuatorCfg()}
-            self.init_state = _InitStateCfg()
+        InitialStateCfg = _InitStateCfg
+
+        def __init__(self, spawn=None, init_state=None, soft_joint_pos_limit_factor=0.9, actuators=None):
+            self.actuators = actuators or {"base_legs": _ActuatorCfg()}
+            self.init_state = init_state or _InitStateCfg()
 
         def replace(self, **kwargs):
             return self
@@ -161,12 +173,8 @@ def make_cfg(num_envs: int = 4, gait: str = "walk") -> UnitreeB1EnvCfg:
     cfg.gait_name = gait
     cfg.scene = InteractiveSceneCfg(num_envs=num_envs)
 
-    offsets = {
-        "walk":  [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
-        "trot":  [0.0, math.pi, math.pi, 0.0],
-        "steer": [0.0, math.pi, math.pi / 2, 3 * math.pi / 2],
-    }
-    cfg.phase_offsets = offsets[gait]
+    # Two-state encoding: trot needs cpg_reversed=True (diagonal pairs FL+RR, FR+RL)
+    cfg.cpg_reversed = (gait == "trot")
     return cfg
 
 

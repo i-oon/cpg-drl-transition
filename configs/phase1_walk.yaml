@@ -1,5 +1,4 @@
-# Phase 1 – Walk: Indirect encoding + phase offsets + tanh + fixed oscillator
-# W shape (20, 3): shared across all legs, phase offsets create timing.
+# Phase 1 – Walk
 
 cpg:
   alpha: 1.01
@@ -12,38 +11,34 @@ rbf:
 
 gait:
   name: walk
-  phase_offsets: [0.0, 3.14159, 1.5708, 4.7124]
+  cpg_reversed: false   # walk uses default two-state encoding
 
 pibb:
-  init_mode: cosine             # "random" or "cosine" (Thor walking prior)
-  exploration_noise: 0.045
-  noise_decay_rate: 0.998       # slow decay
+  init_mode: cosine
+  exploration_noise: 0.19
+  noise_decay_rate: 0.992
   temperature: 10.0
-  init_var_boost: 2.0
-  max_iterations: 2000
+  init_var_boost: 1.5
+  max_iterations: 151
   convergence_threshold: 0.001
 
 reward:
-  w1_distance: 2.0
-  w2_instability: 2.0
-  w3_height_error: 4.0
-  w4_slippage: 2.0
-  w5_phase_error: 0.1
-  w_action_rate: 0.001
-  w_energy: 1e-7
-  height_nominal: 0.42
-  target_velocity: 0.4
+  w_forward:   1.5
+  w_lateral:   1.0
+  w_stability: 1.0
+  w_contact:   1.0
+  height_nominal: 0.55
 
 env:
-  num_envs: 256
-  episode_length: 200
+  num_envs: 15
+  episode_length: 150
   robot: unitree_b1
   terrain: flat
 
 logging:
   log_dir: logs/phase1
-  run_name: walk_indirect_fixed
-  save_interval: 100
+  run_name: walk
+  save_interval: 50
   log_interval: 10
 
 output:
