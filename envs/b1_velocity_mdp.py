@@ -17,6 +17,42 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 
 
+def feet_in_contact(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Binary foot contact state: 1.0 if foot is in contact, 0.0 otherwise.
+
+    Returns (num_envs, 4) float tensor in body order [FL, FR, RL, RR].
+    Used as a policy observation — available on real hardware via /B1/foot_contact
+    with no sim-to-real gap. Noise is added via the ObsTerm noise parameter to
+    simulate brief false readings during foot impact transitions.
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
+    return (contact_time > 0.0).float()
+
+
+def joint_position_penalty(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    stand_still_scale: float,
+    velocity_threshold: float,
+) -> torch.Tensor:
+    """Penalize L2 deviation of joint positions from default pose.
+
+    Ported from unitree_rl_lab (Go2 reference config uses weight=-0.7).
+    When standing still (cmd=0 AND body_vel < threshold), applies
+    stand_still_scale multiplier — prevents joint drift at rest.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    cmd = torch.linalg.norm(env.command_manager.get_command("base_velocity"), dim=1)
+    body_vel = torch.linalg.norm(asset.data.root_lin_vel_b[:, :2], dim=1)
+    reward = torch.linalg.norm(asset.data.joint_pos - asset.data.default_joint_pos, dim=1)
+    moving = torch.logical_or(cmd > 0.0, body_vel > velocity_threshold)
+    return torch.where(moving, reward, stand_still_scale * reward)
+
+
 def excessive_air_time(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,

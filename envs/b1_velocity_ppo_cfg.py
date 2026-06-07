@@ -1,9 +1,9 @@
 """
 RSL-RL PPO hyperparameters for B1 velocity-tracking training.
 
-Mirrors Isaac Lab's stock UnitreeGo2FlatPPORunnerCfg but with deeper nets
-(B1 is ~50 kg vs Go2's ~15 kg — more capacity to discover stable gaits)
-and a higher iteration budget.
+Mirrors Isaac Lab's Go2 flat PPO config. Network is slightly deeper
+([512, 256, 128] vs [256, 128, 64]) since B1 is 4× heavier and the
+policy needs more capacity to handle omnidirectional commands.
 """
 
 from isaaclab.utils import configclass
@@ -17,7 +17,7 @@ from isaaclab_rl.rsl_rl import (
 @configclass
 class B1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 3000
+    max_iterations = 5000
     save_interval = 50
     experiment_name = "b1_flat"
     empirical_normalization = False
@@ -33,12 +33,6 @@ class B1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        # entropy_coef reduced from stock 0.01 to 0.005 as a prophylactic
-        # against bang-bang noise-std runaway on heavy robots. Combined with
-        # action_rate_l2 = -0.025 in the env cfg, the analytic noise-std
-        # equilibrium σ² = entropy/(4·w·dt) ≈ 2.5 → σ ≈ 1.6. If training
-        # still shows Policy/mean_noise_std climbing past 2 by iter ~300,
-        # drop this to 0.001 (external project confirmed it caps σ ≈ 0.7).
         entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
@@ -49,190 +43,3 @@ class B1FlatPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
-
-
-@configclass
-class Phase2PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Phase 2 residual MLP — small network for 4-D action."""
-    num_steps_per_env = 24
-    max_iterations = 1500
-    save_interval = 50
-    experiment_name = "b1_phase2_transition"
-    empirical_normalization = False
-
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.5,                     # smaller than Phase 1's 1.0 — residuals are small corrections
-        actor_hidden_dims=[128, 128],           # matches CLAUDE.md spec
-        critic_hidden_dims=[128, 128],
-        activation="elu",
-    )
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.005,
-        num_learning_epochs=5,
-        num_mini_batches=4,
-        learning_rate=5.0e-4,                   # smaller LR for residual fine-tuning
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-    )
-
-
-@configclass
-class Phase2E2EPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """E2E PPO baseline — learns full blending scalar α from scratch.
-
-    Same backbone as Phase2PPORunnerCfg ([128, 128]) but action_space=1,
-    no residual structure, no hand-designed ramp. Trains from scratch.
-    """
-    num_steps_per_env = 24
-    max_iterations = 1500
-    save_interval = 50
-    experiment_name = "b1_phase2_e2e"
-    empirical_normalization = False
-
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,                     # from scratch → higher init noise
-        actor_hidden_dims=[128, 128],
-        critic_hidden_dims=[128, 128],
-        activation="elu",
-    )
-
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.005,
-        num_learning_epochs=5,
-        num_mini_batches=4,
-        learning_rate=1.0e-3,                   # standard LR — training from scratch
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-    )
-
-
-@configclass
-class Phase2Residual1DPPORunnerCfg(Phase2PPORunnerCfg):
-    """Ablation: scalar residual (1-D Δα broadcast to all legs).
-
-    Identical to Phase2PPORunnerCfg except experiment_name. Same LR, same
-    network size, same smoothstep baseline — only the action dimension differs.
-    """
-    experiment_name = "b1_phase2_residual1d"
-
-
-@configclass
-class Phase2E2ERatePPORunnerCfg(Phase2E2EPPORunnerCfg):
-    """E2E rate-based α — MLP outputs dα/dt, α integrated from 0.
-
-    Same backbone and LR as Phase2E2EPPORunnerCfg. Training from scratch
-    since the rate-integration structure is a new action semantics.
-    """
-    experiment_name = "b1_phase2_e2e_rate"
-
-
-@configclass
-class Phase2ActionSpacePPORunnerCfg(Phase2PPORunnerCfg):
-    """Residual-q 12D — joint-position correction, per-joint (Silver et al.)."""
-    experiment_name = "b1_phase2_residual_q_12d"
-
-
-@configclass
-class Phase2Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
-    """Residual-q 4D — joint-position correction, per-leg scalar.
-
-    Same backbone and hyperparameters as Phase2PPORunnerCfg (4-D output).
-    Dimension matches Residual-α 4D for a fair space-controlled comparison.
-    """
-    experiment_name = "b1_phase2_residual_q_4d"
-
-
-@configclass
-class Phase2Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
-    """Residual-α 12D — blending-weight correction, per-joint.
-
-    Same backbone and hyperparameters as Phase2PPORunnerCfg (12-D output).
-    Dimension matches Residual-q 12D for a fair space-controlled comparison.
-    """
-    experiment_name = "b1_phase2_residual_alpha_12d"
-
-
-@configclass
-class Phase2Alpha12DPhaseAwarePPORunnerCfg(Phase2Alpha12DPPORunnerCfg):
-    """Residual-α 12D with foot-contact phase observation (49D obs)."""
-    experiment_name = "b1_phase2_residual_alpha_12d_phase_aware"
-
-
-@configclass
-class Phase2Alpha4DPhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
-    """Residual-α 4D with foot-contact phase observation (49D obs)."""
-    experiment_name = "b1_phase2_residual_alpha_4d_phase_aware"
-
-
-@configclass
-class Phase2Joint4DPhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
-    """Residual-q 4D with foot-contact phase observation (49D obs)."""
-    experiment_name = "b1_phase2_residual_q_4d_phase_aware"
-
-
-@configclass
-class Phase2ActionSpacePhaseAwarePPORunnerCfg(Phase2PPORunnerCfg):
-    """Residual-q 12D with foot-contact phase observation (49D obs)."""
-    experiment_name = "b1_phase2_residual_q_12d_phase_aware"
-
-
-# V2: policy-phase observation + randomised duration (70D obs)
-@configclass
-class Phase2V2Alpha4DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V2: Residual-α 4D, policy-phase obs, randomised duration."""
-    experiment_name = "b1_phase2_v2_alpha_4d"
-
-
-@configclass
-class Phase2V2Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V2: Residual-α 12D, policy-phase obs, randomised duration."""
-    experiment_name = "b1_phase2_v2_alpha_12d"
-
-
-@configclass
-class Phase2V2Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V2: Residual-q 4D, policy-phase obs, randomised duration."""
-    experiment_name = "b1_phase2_v2_joint_4d"
-
-
-@configclass
-class Phase2V2Joint12DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V2: Residual-q 12D, policy-phase obs, randomised duration."""
-    experiment_name = "b1_phase2_v2_joint_12d"
-
-
-@configclass
-class Phase2V3Alpha4DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V3: Residual-α 4D — V2 + foot contact obs."""
-    experiment_name = "b1_phase2_v3_alpha_4d"
-
-
-@configclass
-class Phase2V3Alpha12DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V3: Residual-α 12D — V2 + foot contact obs."""
-    experiment_name = "b1_phase2_v3_alpha_12d"
-
-
-@configclass
-class Phase2V3Joint4DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V3: Residual-q 4D — V2 + foot contact obs."""
-    experiment_name = "b1_phase2_v3_joint_4d"
-
-
-@configclass
-class Phase2V3Joint12DPPORunnerCfg(Phase2PPORunnerCfg):
-    """V3: Residual-q 12D — V2 + foot contact obs."""
-    experiment_name = "b1_phase2_v3_joint_12d"

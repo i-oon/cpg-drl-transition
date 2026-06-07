@@ -86,6 +86,15 @@ env_cfg.seed = args.seed
 env = gym.make(args.task, cfg=env_cfg)
 env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
+# Wire up contact sensor to actuator net if enabled.
+# Must be done after gym.make() so the scene is fully initialised.
+from envs.b1_velocity_env_cfg import USE_ACTUATOR_NET
+if USE_ACTUATOR_NET:
+    isaac_env = env.unwrapped
+    actuator = isaac_env.scene["robot"].actuators["base_legs"]
+    actuator.contact_sensor = isaac_env.scene["contact_forces"]
+    print("[B1ActuatorNet] Contact sensor wired up to actuator.")
+
 print(f"\n  Task          : {args.task}")
 print(f"  Num envs      : {env.num_envs}")
 print(f"  Obs dim       : {env.num_obs}")
