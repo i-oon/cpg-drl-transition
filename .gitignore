@@ -5,6 +5,8 @@ __pycache__/
 # Training artifacts (weights are large, keep only final ones via LFS or separate)
 weights/
 IsaacLab-LocoNets/
+existing-repo/
+vLib_B1_interface/
 .vscode/
 *.code-workspace
 .DS_Store

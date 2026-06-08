@@ -43,6 +43,7 @@ from envs.b1_velocity_mdp import (
     excessive_contact_time,
     duty_factor_target_penalty,
     feet_in_contact,
+    yaw_stability_penalty,
 )
 
 # ---------------------------------------------------------------------------
@@ -172,9 +173,24 @@ class B1FlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                 },
             )
 
-        # --- Velocity tracking (Go2 values) ---
+        # --- Yaw stability: penalise body rotation when not commanded to turn ---
+        # During strafe/fwd/bwd the policy rotates its body to face the velocity
+        # vector rather than pure-strafing. Weight -2.0 gives ~1.38/step penalty
+        # at wz=0.83 rad/s with cwz=0, exceeding the ~1.4 angular-tracking loss
+        # and making rotation clearly unprofitable when no turn is commanded.
+        # The exp(-cwz²/0.09) gate fades the penalty to ~5% at |cwz|=0.8 rad/s
+        # so turning gaits are unaffected.
+        self.rewards.yaw_stability = RewTerm(
+            func=yaw_stability_penalty,
+            weight=-1.0,
+            params={"command_name": "base_velocity"},
+        )
+
+        # --- Velocity tracking ---
         self.rewards.track_lin_vel_xy_exp.weight = 1.5
-        self.rewards.track_ang_vel_z_exp.weight = 0.75
+        # Raised from 0.75 → 1.5 to fix turning. Keep at 1.5 — reducing it
+        # to 1.0 degraded turn tracking when combined with yaw_stability.
+        self.rewards.track_ang_vel_z_exp.weight = 1.5
 
         # --- Orientation (Go2 value) ---
         self.rewards.flat_orientation_l2.weight = -2.5
@@ -263,7 +279,11 @@ class B1FlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # At 25% duty: (0.25-0.5)^2 × 4 feet = 0.25/step → ~250/episode penalty.
         self.rewards.duty_factor_target = RewTerm(
             func=duty_factor_target_penalty,
-            weight=-2.0,
+            weight=-1.0,
+            # Reduced from -2.0: turning requires asymmetric left/right duty factors.
+            # At -2.0 the duty penalty outweighed the angular tracking reward, causing
+            # the policy to never turn. -1.0 still penalises 3-leg dragging exploits
+            # while leaving room for the wz reward to drive turning gaits.
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot$"),
                 "target": 0.5,

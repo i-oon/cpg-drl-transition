@@ -72,7 +72,7 @@ rel_standing_envs = 0.05  # 5% standing for deceleration / yaw-in-place
 | Term | Weight | Notes |
 |---|---|---|
 | `track_lin_vel_xy_exp` | +1.5 | |
-| `track_ang_vel_z_exp` | +0.75 | |
+| `track_ang_vel_z_exp` | **+1.5** | Raised from +0.75. At +0.75 the net turn benefit was only +0.19/step against duty_factor_target at −2.0 — turning was unprofitable. At +1.5 it matches linear tracking reward and drives symmetric improvement. |
 | `flat_orientation_l2` | −2.5 | |
 | `feet_slide` | −0.1 | Body names changed to `.*_foot$` for B1 |
 | `lin_vel_z_l2` | −2.0 | inherited |
@@ -90,12 +90,13 @@ rel_standing_envs = 0.05  # 5% standing for deceleration / yaw-in-place
 **B1-specific additions (not in Go2):**
 | Term | Weight | Why added | When added |
 |---|---|---|---|
-| `base_height_l2` | −50.0, target=**0.53 m** | Matches sim natural default height (URDF trunk origin at default joints). Real mid-trunk in home pose is 0.55–0.58 m (URDF origin sits below visual center). Target raised 0.42→0.46→0.50→0.53 m as stance improved; 0.53 m eliminates forced crouching that overloaded rear calves | v4 |
-| `excessive_air_time` | −1.0, max=**0.5s** | Catches permanently-airborne leg. 0.15s tried in v9 — conflicted with `feet_air_time` 0.1s threshold, policy escaped via rapid taps (<0.1s). Reverted to 0.5s; use `duty_factor_target` instead for duty bounding. | v6 |
-| `duty_factor_target` | −2.0, target=**0.5** | Directly penalises per-leg duty deviation from 50%. At 25% duty: (0.25−0.5)²×4 feet=0.25/step ≈ 250/episode. No threshold conflict with `feet_air_time`. | v10 |
-| `excessive_contact_time` | −1.0, max=0.5s | Catches permanently-planted leg exploit (observed: single leg at duty >80%) | v6 |
-| `hip_deviation_l1` | −0.2, joints=`.*_hip` | Hip does lateral splay only — observed ±8-11° swing vs hardware default ±1.72°. Anchors hip near zero without conflicting with height target (calf adjusts for height). | v6 |
-| `rear_thigh_deviation_l1` | −0.15, joints=`R._thigh` | Rear thighs drifting toward horizontal (observed: calf P2P 37-41° vs front 20-24° — policy satisfying height via calf bend instead of thigh). Geometrically safe: calf still free to achieve height target. | v7 |
+| `base_height_l2` | −50.0, target=**0.53 m** | Matches sim natural default height (URDF trunk origin at default joints). Real mid-trunk in home pose is 0.55–0.58 m (URDF origin sits below visual center). Target raised 0.42→0.46→0.50→0.53 m as stance improved; 0.53 m eliminates forced crouching that overloaded rear calves | early |
+| `excessive_air_time` | −1.0, max=**0.5s** | Catches permanently-airborne leg. 0.15s tried earlier — conflicted with `feet_air_time` 0.1s threshold, policy escaped via rapid taps (<0.1s). Reverted to 0.5s; use `duty_factor_target` instead for duty bounding. | early |
+| `duty_factor_target` | **−1.0**, target=**0.5** | Directly penalises per-leg duty deviation from 50%. At 25% duty: (0.25−0.5)²×4 feet=0.25/step ≈ 250/episode. No threshold conflict with `feet_air_time`. Weight reduced −2.0→−1.0 after turn training: at −2.0 the duty penalty outweighed the turning reward and blocked asymmetric gaits needed for turning. | turn_base |
+| `excessive_contact_time` | −1.0, max=0.5s | Catches permanently-planted leg exploit (observed: single leg at duty >80%) | early |
+| `hip_deviation_l1` | −0.2, joints=`.*_hip` | Hip does lateral splay only — observed ±8-11° swing vs hardware default ±1.72°. Anchors hip near zero without conflicting with height target (calf adjusts for height). | early |
+| `rear_thigh_deviation_l1` | −0.15, joints=`R._thigh` | Rear thighs drifting toward horizontal (observed: calf P2P 37-41° vs front 20-24° — policy satisfying height via calf bend instead of thigh). Geometrically safe: calf still free to achieve height target. | early |
+| `yaw_stability` | **−1.0**, sigma²=**0.04** | Penalises heading drift when wz command is near zero: `wz² × exp(−cwz²/0.04)`. Gate fades to 37% at \|cwz\|=0.2, to 2% at \|cwz\|=0.4 — shuts off during real turn commands but suppresses drift during strafe. **Creates a ~0.3 rad/s effective dead zone for wz commands** (see Deployment notes). First attempt (weight=−2.0, sigma²=0.09) caused falls; sigma too wide fought turns at cwz=0.3. | yaw_stable_BEST |
 
 **Removed from Go2:**
 | Term | Reason |
@@ -123,16 +124,19 @@ rel_standing_envs = 0.05  # 5% standing for deceleration / yaw-in-place
 
 | Run | Key config | Outcome | Why changed |
 |---|---|---|---|
-| v1 | Go2 base, no extra terms | **Spider-man** — squat to 0.30 m, 3 legs mostly airborne (FL=0%, FR=0%, RL=0.6%) | Missing `joint_position_penalty` from Go2 config |
-| v2 | + `joint_position_penalty` (−0.7) | **Tap-tapping** — height fixed to 0.53 m (too tall), all 4 legs cycling but 5 Hz micro-steps, foot apex 1.9–3.0 cm | Default URDF pose = 0.53 m, `joint_pos` pulls up; `feet_air_time` threshold 0.3 s unachievable |
-| v3 | + `base_height_l2` (−50, target 0.42) + `joint_lr_symmetry` (−0.05) + `excessive_air_time` (0.5s) | **Conflict storm** — `joint_pos` vs `base_height_l2` fighting (−282 vs −202), reward total 1323 | `joint_pos` pulls to 0.53 m, height penalty pulls to 0.42 m — irreconcilable |
-| v4 | Remove `joint_pos`, keep height + symmetry (−0.01) + air time | **3-leg exploit (RL)** — height solved (0.426 m ✓), but RL permanently airborne (duty 20%, mean air 1.9 s) | `joint_lr_symmetry` at −0.01 too weak; RL=20% vs RR=53% |
-| v5 | + `excessive_contact_time` (0.5s) + symmetry → −0.05 + `feet_air_time` threshold 0.1s | **Symmetry penalty fights trot** — `joint_lr_symmetry` −255/episode (fires on every trot step since FL/FR always in opposite phases), body rocking | `joint_lr_symmetry` penalises instantaneous L/R differences which are always large in trot |
-| v6 | Remove `joint_lr_symmetry`, keep `excessive_air_time` + `excessive_contact_time` + `hip_deviation_l1` (−0.2) | **4-leg trot** — all legs cycling (FL 60.6%, FR 61.0%, RL 48.3%, RR 45.1%), vel tracking err_v mean 0.031, height 0.509 m ✓. Rear thigh drooping (calf P2P 37-41° vs front 20-24°) | Add `rear_thigh_deviation_l1` to anchor rear thighs |
-| v7 | Height target 0.50→**0.53 m** (sim natural default) | **Rear calf worse** (40→47° P2P); rear duty dropped 45→30%. Fine-tuning preserved the calf-dominant pattern; height increase required more calf travel at 0.53m. | Height alone doesn't fix rear leg geometry — deep local optimum requires retrain |
-| v8 | Rear thigh default 1.08→**0.90 rad** + retrain from scratch | Rear thigh angle fixed (52° vs 62°), thigh P2P improved (RL 32°, RR 24° vs 13-18°). But rear duty regressed to 25-27% — `excessive_air_time` 0.5s never fires at natural gait swing ~0.18s | Tighten `excessive_air_time` 0.5→0.15s |
-| v9 | `excessive_air_time` max 0.5s→**0.15s** | Tap-tap shuffling gait: air time mean 0.031–0.053s, duty 57–81%. Policy escaped by tapping < 0.15s — avoids penalty but barely lifts feet. Confirmed conflict with `feet_air_time` 0.1s threshold. | Revert to 0.5s; add `duty_factor_target_penalty` instead |
-| **v10 (current)** | Revert `excessive_air_time` to 0.5s + add `duty_factor_target` (−2.0, target=0.5) | *Training planned* | `duty_factor_target` directly penalises per-leg duty deviation from 50% with no threshold conflict. |
+| Go2 base | Go2 base, no extra terms | **Spider-man** — squat to 0.30 m, 3 legs mostly airborne (FL=0%, FR=0%, RL=0.6%) | Missing `joint_position_penalty` from Go2 config |
+| + joint_pos | + `joint_position_penalty` (−0.7) | **Tap-tapping** — height fixed to 0.53 m (too tall), all 4 legs cycling but 5 Hz micro-steps, foot apex 1.9–3.0 cm | Default URDF pose = 0.53 m, `joint_pos` pulls up; `feet_air_time` threshold 0.3 s unachievable |
+| + height | + `base_height_l2` (−50, target 0.42) + `joint_lr_symmetry` (−0.05) + `excessive_air_time` (0.5s) | **Conflict storm** — `joint_pos` vs `base_height_l2` fighting (−282 vs −202), reward total 1323 | `joint_pos` pulls to 0.53 m, height penalty pulls to 0.42 m — irreconcilable |
+| remove joint_pos | Remove `joint_pos`, keep height + symmetry (−0.01) + air time | **3-leg exploit (RL)** — height solved (0.426 m ✓), but RL permanently airborne (duty 20%, mean air 1.9 s) | `joint_lr_symmetry` at −0.01 too weak; RL=20% vs RR=53% |
+| + contact_time | + `excessive_contact_time` (0.5s) + symmetry → −0.05 + `feet_air_time` threshold 0.1s | **Symmetry penalty fights trot** — `joint_lr_symmetry` −255/episode (fires on every trot step since FL/FR always in opposite phases), body rocking | `joint_lr_symmetry` penalises instantaneous L/R differences which are always large in trot |
+| remove symmetry | Remove `joint_lr_symmetry`, keep `excessive_air_time` + `excessive_contact_time` + `hip_deviation_l1` (−0.2) | **4-leg trot** — all legs cycling (FL 60.6%, FR 61.0%, RL 48.3%, RR 45.1%), vel tracking err_v mean 0.031, height 0.509 m ✓. Rear thigh drooping (calf P2P 37-41° vs front 20-24°) | Add `rear_thigh_deviation_l1` to anchor rear thighs |
+| height 0.53 m | Height target 0.50→**0.53 m** (sim natural default) | **Rear calf worse** (40→47° P2P); rear duty dropped 45→30%. Fine-tuning preserved the calf-dominant pattern; height increase required more calf travel at 0.53m. | Height alone doesn't fix rear leg geometry — deep local optimum requires retrain |
+| rear thigh 0.90 | Rear thigh default 1.08→**0.90 rad** + retrain from scratch | Rear thigh angle fixed (52° vs 62°), thigh P2P improved (RL 32°, RR 24° vs 13-18°). But rear duty regressed to 25-27% — `excessive_air_time` 0.5s never fires at natural gait swing ~0.18s | Tighten `excessive_air_time` 0.5→0.15s |
+| air_time 0.15s | `excessive_air_time` max 0.5s→**0.15s** | Tap-tap shuffling gait: air time mean 0.031–0.053s, duty 57–81%. Policy escaped by tapping < 0.15s — avoids penalty but barely lifts feet. Confirmed conflict with `feet_air_time` 0.1s threshold. | Revert to 0.5s; add `duty_factor_target_penalty` instead |
+| + duty_factor | Revert `excessive_air_time` to 0.5s + add `duty_factor_target` (−2.0, target=0.5) | Good baseline gait. But turning broken — wz never triggered (wz tracking reward too low vs duty penalty). `track_ang_vel_z_exp: 959` vs forward `1457`. Robot would sidestep instead of rotate. | Raise `track_ang_vel_z_exp` 0.75→1.5, lower `duty_factor_target` −2.0→−1.0 |
+| **turn_base** | `track_ang_vel_z_exp` +1.5, `duty_factor_target` −1.0. 7000 iters from scratch. | **Turning fixed** — `track_ang_vel_z_exp: 1457`, matches linear tracking. All 6 DOF commands working. But heading drifts ±90° during strafe (no yaw stability term). | Add `yaw_stability_penalty` to fix drift |
+| yaw_stable FAILED | Add `yaw_stability` (weight=−2.0, sigma²=0.09) from turn_base checkpoint. Reduce `track_ang_vel_z_exp` to 1.0. | **Falls** — `base_contact: 0.042` (1 in 24 episodes). Turn tracking degraded to 959. sigma²=0.09 too wide: at cwz=0.3 gate still 37%, actively fighting turn commands. | Tighten sigma²=0.04, restore ang_vel weight to 1.5, reduce penalty weight to −1.0 |
+| **yaw_stable_BEST** | `yaw_stability` weight=−1.0, sigma²=0.04, `track_ang_vel_z_exp` weight=1.5. Fine-tuned from turn_base checkpoint at iter 7000 → 11997. | **No falls** (`base_contact: 0.000`). Turning maintained (`track_ang_vel_z_exp: 1457`). Strafe drift reduced. sigma²=0.04 gate fades to 2% at \|cwz\|=0.4 — penalty off during real turn commands. | **Checkpoint: `logs/ppo_b1/yaw_stable_BEST/model_final.pt`** |
 
 ### Key lessons
 
@@ -140,6 +144,9 @@ rel_standing_envs = 0.05  # 5% standing for deceleration / yaw-in-place
 - **`feet_air_time` threshold must be achievable** — at threshold=0.3 s and natural gait frequency of 5 Hz (0.08 s air phases), every touchdown is penalised. Policy learns to never lift feet. Threshold 0.1 s is closer to actual air time.
 - **`joint_lr_symmetry_penalty` fights trot** — trot inherently has FL/FR in opposite phases. Instantaneous L/R velocity differences are always large. Use `excessive_air_time` + `excessive_contact_time` instead.
 - **3-leg exploits need dual bounding** — `excessive_air_time(0.5s)` catches permanently-airborne legs; `excessive_contact_time(0.5s)` catches permanently-planted legs. Both needed.
+- **Turning requires reward balance** — `track_ang_vel_z_exp` must be at least as large as `track_lin_vel_xy_exp`. At weight=0.75 vs linear=1.5, turning is unprofitable when `duty_factor_target` penalises the asymmetric gaits turning requires. Raise both to 1.5 together.
+- **`yaw_stability` sigma must be tight** — sigma²=0.09 (σ≈0.3 rad/s) still gates at 37% when cwz=0.3, actively fighting turn commands. sigma²=0.04 (σ=0.2 rad/s) fades to 2% at cwz=0.4 — only active when the robot is genuinely not supposed to rotate.
+- **`yaw_stability` creates a wz dead zone** — the gate `exp(−cwz²/sigma²)` teaches the policy to suppress rotation for small cwz. At sigma²=0.04, the effective dead zone is |cwz| < 0.3 rad/s. This is intentional (prevents drift), but **must be accounted for in joystick mapping at deployment** (see Deployment section).
 
 ---
 
@@ -211,6 +218,82 @@ Then rebuild: `cd ~/Sim2Real-B1/b1_ws && colcon build && source install/setup.ba
 
 Note: actuator net training data does NOT need this — angular velocity is body-level and
 irrelevant to joint motor dynamics. Only needed at policy deployment time.
+
+---
+
+### Current best checkpoint
+
+```
+logs/ppo_b1/yaw_stable_BEST/model_final.pt
+```
+Trained: omnidirectional (vx, vy, wz), heading-stable during strafe, no falls.
+
+---
+
+### Heading command mode (CRITICAL for deployment)
+
+The parent `velocity_env_cfg.py` uses **`heading_command=True`** with **`rel_heading_envs=1.0`**.
+This means **100% of training environments** use heading-control mode, not raw wz tracking:
+
+```
+obs[wz_slot] = K × wrap_to_pi(heading_target − robot_heading)
+            where K = heading_control_stiffness = 0.5
+```
+
+**The policy was never trained on raw wz commands.** It was trained on heading errors.
+
+Every `env.step()` overwrites `vel_command_b[:, 2]` with the heading-error signal.
+Any code that sets `vel_command_b[:, 2]` directly is silently overridden.
+
+**Correct injection for teleop/deployment:**
+
+```python
+_HEAD_K = 0.5  # from parent config: heading_control_stiffness
+
+def inject_cmd(cmd_term, robot, vx, vy, wz_desired):
+    cmd_term.vel_command_b[:, 0] = vx
+    cmd_term.vel_command_b[:, 1] = vy
+    # Set heading_target so heading_error = wz_desired / K
+    current_heading = robot.data.heading_w  # world-frame yaw [num_envs]
+    if abs(wz_desired) < 1e-4:
+        cmd_term.heading_target[:] = current_heading  # hold heading → obs wz ≈ 0
+    else:
+        cmd_term.heading_target[:] = current_heading + wz_desired / _HEAD_K
+```
+
+**Why this works:** heading_error = (current + wz/K) − current = wz/K → obs[wz] = K × (wz/K) = wz_desired.
+
+**Call this every control step, not only when commands change.** If you only update `heading_target` once (e.g., at command transitions), the robot's natural gait drift will cause `current_heading` to diverge from the fixed `heading_target`. Heading error accumulates silently. At the next segment or command change, the heading controller fires a large cwz correction burst — the robot turns even though you commanded wz=0. Setting `heading_target = current_heading` every step for wz=0 keeps heading_error ≈ 0 at all times and prevents correction bursts at transitions.
+
+**For joystick deployment:** the right joystick axis should not set vel_command_b[2].
+It should advance heading_target at a rate proportional to joystick deflection:
+```python
+# Each control loop tick (50 Hz, dt=0.02s):
+wz_desired = joystick_right_axis * max_wz  # e.g. max_wz = 1.0
+cmd_term.heading_target[:] = robot.data.heading_w + wz_desired / HEAD_K
+```
+
+**Symptoms of getting this wrong** (injecting vel_command_b[:, 2] directly):
+- Robot ignores turn commands from joystick/keyboard
+- Robot turns unexpectedly toward its reset heading target
+- Turning behavior appears random and unrelated to commands
+
+### Joystick wz dead zone
+
+The `yaw_stability_penalty` (sigma²=0.04) creates an effective dead zone below ~0.3 rad/s.
+The policy suppresses rotation for small cwz — intentional (prevents strafe drift), but
+means light joystick touches produce no turning. Apply a dead zone + rescale:
+
+```python
+def map_wz(joystick_val, max_wz=1.0, dead=0.3):
+    """joystick_val in [-1, 1], returns wz_desired in rad/s"""
+    if abs(joystick_val) < dead:
+        return 0.0
+    sign = 1.0 if joystick_val > 0 else -1.0
+    return sign * (abs(joystick_val) - dead) / (1.0 - dead) * max_wz
+```
+
+Note: this dead zone applies to `wz_desired` before the heading_target calculation above.
 
 ---
 
@@ -386,11 +469,94 @@ logs/
 
 ---
 
+## Play Script
+
+```bash
+conda activate env_isaaclab
+cd ~/cpg-drl-transition
+
+# Teleop (keyboard control)
+python scripts/play_b1_velocity.py \
+    --checkpoint logs/ppo_b1/yaw_stable_BEST/model_final.pt \
+    --teleop --follow_cam --num_envs 1 --steps 50000
+
+# Scripted demo (records all motion capabilities)
+python scripts/play_b1_velocity.py \
+    --checkpoint logs/ppo_b1/yaw_stable_BEST/model_final.pt \
+    --demo --follow_cam --num_envs 1
+
+# Record video
+python scripts/play_b1_velocity.py \
+    --checkpoint logs/ppo_b1/yaw_stable_BEST/model_final.pt \
+    --demo --follow_cam --num_envs 1 --video logs/videos/
+```
+
+### Teleop keys
+| Key | Action |
+|---|---|
+| W / S | forward / backward (±0.1 m/s per press, max ±0.8/0.5) |
+| A / D | strafe left / right (±0.1 m/s per press, max ±0.5) |
+| Q / E | turn left / right (**±0.4 rad/s per press** — large step to clear ~0.3 rad/s dead zone) |
+| SPACE | stop + reset heading target (clears any residual cwz from prior turn commands) |
+| ESC | quit |
+
+### Scripted demo sequence (`--demo`)
+
+| Steps | vx | vy | wz | Segment |
+|---|---|---|---|---|
+| 150 | 0.0 | 0.0 | 0.0 | stand |
+| 200 | 0.3 | 0.0 | 0.0 | walk fwd slow |
+| 200 | 0.6 | 0.0 | 0.0 | walk fwd med |
+| 200 | 0.8 | 0.0 | 0.0 | walk fwd fast |
+| 250 | −0.4 | 0.0 | 0.0 | walk backward |
+| 250 | 0.0 | +0.4 | 0.0 | strafe left |
+| 250 | 0.0 | −0.4 | 0.0 | strafe right |
+| 200 | 0.5 | +0.3 | 0.0 | diagonal fwd-left |
+| 200 | 0.5 | −0.3 | 0.0 | diagonal fwd-right |
+| 250 | 0.0 | 0.0 | +1.0 | turn left |
+| 250 | 0.0 | 0.0 | −1.0 | turn right |
+| 150 | 0.0 | 0.0 | 0.0 | stand |
+
+Each step = 0.02 s sim time (50 Hz). Total: 2650 steps = 53 s.
+
+### Follow camera
+`--follow_cam` tracks the robot in 3rd-person front view (yaw-only EMA smoothing).
+Offset adjustable with `--cam_offset X Y Z` (default: `3.0 0.0 0.5` — 3.0 m behind, 0.5 m up).
+Look-at target z=0.1 m (low, keeps the feet visible in frame).
+
+### Video recording
+
+`--video <dir>` saves a video of the session. Isaac Sim with rendering runs slower than
+50 Hz real-time, but the `RecordVideo` wrapper declares 50 fps — the raw file plays back
+sped up. The script corrects this automatically after recording:
+
+```
+Measures: actual_fps = total_steps / elapsed_wall_time
+Applies:  ffmpeg -vf "setpts=<(50/actual_fps)>*PTS" -r <actual_fps> <src>.mp4 → <src>_realtime.mp4
+```
+
+The corrected file is written as `*_realtime.mp4` alongside the raw file. If sim ran near
+50 Hz (<5% difference), no correction is applied.
+
+### Isaac Lab quaternion convention
+Isaac Lab uses **[w, x, y, z]** (scalar-first), NOT [x, y, z, w].
+```python
+quat_w = robot.data.root_quat_w[0].cpu().numpy()
+_w, _x, _y, _z = quat_w  # correct unpacking
+yaw = np.arctan2(2.0*(_w*_z + _x*_y), 1.0 - 2.0*(_y*_y + _z*_z))
+```
+
+---
+
 ## Known Issues / Next Steps
 
-- [ ] **v7 training pending** — verify `rear_thigh_deviation_l1` fixes rear thigh drooping without introducing height-target conflict
-- [ ] Test all command directions in playback (forward, backward, lateral, diagonal, turn)
-- [ ] Verify policy survives gain DR range (kp ±25%) in playback
-- [ ] Per-joint-type actuator split (hip/thigh/knee separate kp/kd) for better locomotion quality
+- [x] All 6 DOF commands working (vx, vy, wz forward, backward, strafe, diagonal, turn)
+- [x] Heading stable during strafe (yaw_stability_penalty)
+- [x] No falls in current policy (base_contact: 0.000)
+- [ ] **Strafe tracking is stochastic** — observed ~18% success rate in demo runs. The policy can strafe but whether it does on a given run is probabilistic. Not a bug; policy capability limit from the training distribution.
+- [ ] **Slow forward speed (vx≈0.3) often appears as standing** — `track_lin_vel_xy_exp` with std=0.5 gives only 0.45 reward/step at vx=0.3 vs 1.38 at vx=0.8. The policy has weak incentive to walk at slow speeds.
+- [ ] Joystick wz dead zone mapping not yet implemented in deployment node — see above
+- [ ] Deploy to real hardware — deployment bridge in `Sim2Real-B1/b1_deployment/`
+- [ ] Verify joint order remap + coordinate conversion on real robot before moving
+- [ ] Per-joint-type actuator split (hip/thigh/knee separate kp/kd) for future improvement
 - [ ] Terrain curriculum for real-world robustness
-- [ ] Deployment bridge (after policy is ready)

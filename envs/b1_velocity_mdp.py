@@ -346,6 +346,31 @@ def pace_coordination_reward(
     return (pattern_a | pattern_b).float()
 
 
+def yaw_stability_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize yaw rate when no turning command is given.
+
+    During strafe/forward/backward (cwz≈0) the policy tends to rotate its body
+    to face the velocity vector rather than pure-strafing. This penalty fires
+    proportionally to wz_actual² and fades when a real turn is commanded,
+    giving a strong gradient to maintain heading during non-turning motion.
+
+    Shape: wz_actual² × exp(-cwz² / 0.09)
+      → ≈1× at cwz=0 (full penalty)
+      → ≈0.05× at |cwz|=0.8 rad/s (nearly off during turn command)
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    cwz = env.command_manager.get_command(command_name)[:, 2]
+    wz = asset.data.root_ang_vel_b[:, 2]
+    # sigma²=0.04 → gate ≈1 at cwz=0, ≈0.37 at |cwz|=0.2, ≈0.02 at |cwz|=0.4
+    # Tighter than before (was 0.09) so turning commands shut off the penalty faster
+    no_turn_weight = torch.exp(-cwz ** 2 / 0.04)
+    return wz ** 2 * no_turn_weight
+
+
 def duty_factor_target_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
