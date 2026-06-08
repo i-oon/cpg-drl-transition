@@ -247,17 +247,18 @@ _record_start = time.perf_counter()
 for step in range(args.steps):
     def _inject_cmd(vx, vy, wz):
         cmd_term = env.unwrapped.command_manager._terms["base_velocity"]
-        # vx / vy: set directly — heading control does not touch these slots
         cmd_term.vel_command_b[:, 0] = vx
         cmd_term.vel_command_b[:, 1] = vy
-        # wz: heading_command=True means env.step() overwrites vel_command_b[:,2] every step
-        # with K * wrap_to_pi(heading_target - robot_heading). Inject via heading_target instead.
+        # Always write slot 2 directly so raw-wz policies see the correct command.
+        # heading-cmd policies: env.step() overwrites this with K*heading_error anyway.
+        # raw-wz policies: env.step() does NOT overwrite slot 2, so this is the only
+        # way to inject wz. Also overrides periodic command resampling in both modes.
+        cmd_term.vel_command_b[:, 2] = wz
+        # heading_target injection for heading-cmd policies (ignored in raw-wz mode):
         current_heading = robot.data.heading_w  # [num_envs], world-frame yaw
         if abs(wz) > 1e-4:
-            # Advance heading target → heading_error = wz/K → obs cwz = wz_desired
             cmd_term.heading_target[:] = current_heading + wz / _HEAD_K
         else:
-            # Hold current heading every step → cwz ≈ 0, no drift correction burst
             cmd_term.heading_target[:] = current_heading
 
     # --- Demo: advance scripted sequence ---

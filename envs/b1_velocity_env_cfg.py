@@ -26,6 +26,7 @@ from pathlib import Path
 import gymnasium as gym
 
 from isaaclab.envs import mdp
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
@@ -160,7 +161,6 @@ class B1FlatEnvCfg(LocomotionVelocityRoughEnvCfg):
         # This is the primary sim-to-real bridge when using ideal PD (no actuator net).
         # Disabled automatically when USE_ACTUATOR_NET=True (net captures gain variability).
         if not USE_ACTUATOR_NET:
-            from isaaclab.managers import EventTermCfg as EventTerm
             self.events.randomize_actuator_gains = EventTerm(
                 func=mdp.randomize_actuator_gains,
                 mode="reset",
@@ -172,6 +172,40 @@ class B1FlatEnvCfg(LocomotionVelocityRoughEnvCfg):
                     "distribution": "uniform",
                 },
             )
+
+        # Foot friction DR: real floors range from tile (~0.5) to rubber mat (~1.25).
+        # Randomizing foot material properties at reset covers surface variability
+        # the policy will encounter on hardware.
+        self.events.randomize_foot_material = EventTerm(
+            func=mdp.randomize_rigid_body_material,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot$"),
+                "static_friction_range": (0.5, 1.25),
+                "dynamic_friction_range": (0.4, 1.0),
+                "restitution_range": (0.0, 0.0),
+                "num_buckets": 16,
+            },
+        )
+
+        # Joint friction DR: three separate terms (one per joint type) to work around
+        # a shape bug in this Isaac Lab version where randomize_joint_parameters with
+        # slice(None) produces [N,1,12] instead of [N,12]. Per-type terms avoid it.
+        for _jname, _jpattern in [
+            ("hip",   ".*_hip_joint"),
+            ("thigh", ".*_thigh_joint"),
+            ("calf",  ".*_calf_joint"),
+        ]:
+            setattr(self.events, f"randomize_joint_friction_{_jname}", EventTerm(
+                func=mdp.randomize_joint_parameters,
+                mode="reset",
+                params={
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=[_jpattern]),
+                    "friction_distribution_params": (0.0, 0.05),
+                    "operation": "add",
+                    "distribution": "uniform",
+                },
+            ))
 
         # --- Yaw stability: penalise body rotation when not commanded to turn ---
         # During strafe/fwd/bwd the policy rotates its body to face the velocity
@@ -330,6 +364,34 @@ class B1FlatEnvCfg_PLAY(B1FlatEnvCfg):
         self.events.push_robot = None
 
 
+@configclass
+class B1FlatEnvCfg_RawWz(B1FlatEnvCfg):
+    """Raw-wz variant: policy receives and tracks wz directly instead of heading error.
+
+    Parent uses heading_command=True (inherited from Isaac Lab's LocomotionVelocityRoughEnvCfg),
+    which means env.step() overwrites vel_command_b[:,2] with K×wrap_to_pi(heading_target−yaw).
+    The policy was never exposed to raw wz commands during training.
+
+    This variant disables heading-command mode so vel_command_b[:,2] IS the raw wz command.
+    Deployment is simpler: inject wz directly, no heading_target math needed.
+    Train from scratch and compare against yaw_stable_BEST in sim before hardware.
+    """
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.base_velocity.heading_command = False
+
+
+@configclass
+class B1FlatEnvCfg_RawWz_PLAY(B1FlatEnvCfg_RawWz):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 32
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.events.base_external_force_torque = None
+        self.events.push_robot = None
+
+
 ##
 # Gym registration — executed on import.
 ##
@@ -350,6 +412,26 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}:B1FlatEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:B1FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-Unitree-B1-RawWz-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}:B1FlatEnvCfg_RawWz",
+        "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:B1FlatPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Velocity-Flat-Unitree-B1-RawWz-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}:B1FlatEnvCfg_RawWz_PLAY",
         "rsl_rl_cfg_entry_point": "envs.b1_velocity_ppo_cfg:B1FlatPPORunnerCfg",
     },
 )
